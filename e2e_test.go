@@ -217,9 +217,17 @@ func TestEndToEndDownloadAgainstStrictUpstream(t *testing.T) {
 	if got.Query.Get("tid") != "3691410" {
 		t.Errorf("tid = %q", got.Query.Get("tid"))
 	}
-	if got.Query.Get("downloader") != "" || got.Query.Get("save_path") != "" {
-		t.Errorf("未配置时应传空值，实际 downloader=%q save_path=%q",
-			got.Query.Get("downloader"), got.Query.Get("save_path"))
+	// downloader 必须**非空**：上游对空标识的回应是 `未找到下载器: ...`，
+	// 与官方文档"选填"的标注相反（实测如此）。空配置会在 App 构造期补成内置默认值。
+	if got.Query.Get("downloader") == "" {
+		t.Error("downloader 不能为空，否则上游会返回『未找到下载器』")
+	}
+	if got.Query.Get("downloader") != defaultDownloader {
+		t.Errorf("downloader = %q，期望默认值 %q", got.Query.Get("downloader"), defaultDownloader)
+	}
+	// save_path 不同：留空是合法的，表示交给上游决定。
+	if got.Query.Get("save_path") != "" {
+		t.Errorf("未配置保存路径时应传空值，实际 %q", got.Query.Get("save_path"))
 	}
 	if got.APIKey != "e2e-key" {
 		t.Errorf("上游未收到 X-API-Key，实际 %q", got.APIKey)

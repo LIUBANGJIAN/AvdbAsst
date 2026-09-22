@@ -64,10 +64,19 @@ type App struct {
 const writableTTL = 10 * time.Second
 
 // NewApp 构造应用。所有依赖在这里显式注入，不使用全局变量。
+//
+// 这里只补一条构造期不变量：**下载器不能为空**。
+// 生产路径（ResolveConfig → NewApp）本来就归一化过，但测试与将来的其它入口
+// 可能直接构造 Config；一旦漏掉，就会变成"下载器为空 → 上游回一句看不懂的
+// 『未找到下载器』"。
+//
+// 刻意只做这一条、而不是整体跑 normalizeConfig：后者会按 TimeoutSec 重算
+// Timeout，把"直接指定亚秒级超时"的能力一并抹掉（测试正依赖这一点）。
 func NewApp(cfg Config, logger *slog.Logger) *App {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	cfg.Downloader = withDownloaderDefault(cfg.Downloader)
 	app := &App{
 		cfg:       cfg,
 		client:    NewAvdbClient(cfg),
@@ -143,6 +152,12 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /settings", a.handleSettings)
 	mux.HandleFunc("POST /settings", a.handleSettingsSave)
 	mux.HandleFunc("POST /api/settings/test", a.handleSettingsTest)
+
+	// 上游凭据探测：只读操作，但会携带用户刚输入的密码，因此同样强制 POST + 同源。
+	//   - login：邮箱/用户名 + 密码换 JWT，随后探测可用下载器清单；
+	//   - directories：用 API Key 校验下载器标识并列出可选保存目录。
+	mux.HandleFunc("POST /api/settings/login", a.handleSettingsLogin)
+	mux.HandleFunc("POST /api/settings/directories", a.handleSettingsDirectories)
 
 	mux.HandleFunc("GET /opensearch.xml", a.handleOpenSearch)
 	mux.HandleFunc("GET /healthz", a.handleHealthz)
@@ -498,11 +513,37 @@ func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
 	result := interpretDownloadResult(status, body)
 	result.TID = tid
 	if !result.Success {
+		result.Message = humanizeDownloadFailure(result.Message, cfg)
 		a.log.Warn("上游拒绝下载", "tid", tid, "status", status, "message", result.Message)
 	} else {
 		a.log.Info("提交下载成功", "tid", tid)
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+// downloaderNotFoundHints 是上游"下载器不存在"报错的特征片段。
+// 上游原文形如 `未找到下载器: xxx`，不同版本也可能是英文表述。
+var downloaderNotFoundHints = []string{
+	"未找到下载器", "下载器不存在", "找不到下载器",
+	"downloader not found", "unknown downloader", "invalid downloader",
+}
+
+// humanizeDownloadFailure 给上游的下载失败信息补上"下一步该做什么"。
+//
+// 上游对下载器标识不存在只回一句 `未找到下载器: xxx`，用户拿到这句完全无从下手：
+// 既不知道去哪改，也不知道该填什么。这里补上入口与当前配置值，
+// 并保留上游原文，方便排查时对照。
+func humanizeDownloadFailure(message string, cfg Config) string {
+	lower := strings.ToLower(message)
+	for _, hint := range downloaderNotFoundHints {
+		if strings.Contains(lower, strings.ToLower(hint)) {
+			return fmt.Sprintf(
+				"上游没有找到下载器 %q。请到「设置」页确认「下载器」标识，或用「登录上游」自动读出可用清单。（上游原文：%s）",
+				cfg.Downloader, message,
+			)
+		}
+	}
+	return message
 }
 
 // interpretDownloadResult 把五花八门的上游响应统一成 {success, message}。
@@ -604,6 +645,11 @@ type settingsViewData struct {
 	TimeoutSec int
 	MaxResults int
 
+	// DownloaderOptions / SavePathOptions 是上次从上游探测到的候选，
+	// 只用于给输入框提供下拉提示（<datalist>），不改变任何默认行为。
+	DownloaderOptions []DownloaderOption
+	SavePathOptions   []string
+
 	// 密钥类字段只回显掩码，永远不回显明文。
 	// Avdb 官方文档明确要求令牌不得进入前端，掩码既能让用户确认"已配置"，
 	// 又不会在 HTML、浏览器缓存或代理日志里留下完整凭证。
@@ -638,6 +684,9 @@ func (a *App) buildSettingsData(cfg Config) settingsViewData {
 		SavePath:   cfg.SavePath,
 		TimeoutSec: cfg.TimeoutSec,
 		MaxResults: cfg.MaxResults,
+
+		DownloaderOptions: cfg.DownloaderOptions,
+		SavePathOptions:   cfg.SavePathOptions,
 
 		APIKeyMasked:      MaskSecret(cfg.APIKey),
 		AccessTokenMasked: MaskSecret(cfg.AccessToken),
@@ -801,6 +850,216 @@ func (a *App) handleSettingsTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, downloadResponse{Success: true, Message: "连接正常，地址与令牌均可用"})
+}
+
+// settingsProbeResponse 是 /api/settings/* 两个探测接口的统一响应。
+type settingsProbeResponse struct {
+	Success     bool               `json:"success"`
+	Message     string             `json:"message"`
+	Need2FA     bool               `json:"need_2fa,omitempty"`
+	OTPToken    string             `json:"otp_token,omitempty"`
+	Downloaders []DownloaderOption `json:"downloaders,omitempty"`
+	Directories []string           `json:"directories,omitempty"`
+	Trace       []string           `json:"trace,omitempty"`
+}
+
+// guardSameOriginJSON 收敛探测接口的来源校验。
+//
+// 这两个接口虽然是只读的，但会携带用户刚输入的密码，且能读上游设置，
+// 因此与"保存设置"享受同等待遇：必须 POST + 同源。
+func (a *App) guardSameOriginJSON(w http.ResponseWriter, r *http.Request, action string) bool {
+	if sameOrigin(r) {
+		return true
+	}
+	a.log.Warn("拒绝跨站探测请求",
+		"action", action,
+		"origin", r.Header.Get("Origin"),
+		"referer", r.Header.Get("Referer"),
+		"host", r.Host,
+	)
+	writeJSON(w, http.StatusForbidden, settingsProbeResponse{
+		Message: "跨站请求被拒绝。" + originDiagnosis(r),
+	})
+	return false
+}
+
+// probeTarget 从表单解析"要探测哪台上游、用哪个 API Key"。
+//
+// 两个字段都遵循同一个约定：**留空即沿用已保存的值**。
+// 早先 api_base_url 是"留空即空地址"，和 api_key 的语义不一致——
+// 设置页总会带上字段值，所以页面上看不出问题，但任何直接调这两个接口的
+// 调用方都会莫名其妙地收到"上游 API 地址为空"。口径统一后才说得通。
+func (a *App) probeTarget(r *http.Request) (Config, error) {
+	saved := a.currentConfig()
+	candidate := saved
+	candidate.APIBaseURL = firstNonEmpty(strings.TrimSpace(r.PostFormValue("api_base_url")), saved.APIBaseURL)
+	candidate.APIKey = resolveSecret(r.PostFormValue("api_key"), false, saved.APIKey)
+	candidate.TimeoutSec = clampInt(parseIntOr(r.PostFormValue("timeout_seconds"), saved.TimeoutSec), 1, 600)
+	candidate = normalizeConfig(candidate)
+
+	if err := candidate.Validate(); err != nil {
+		return candidate, err
+	}
+	// 探测用较短超时：让用户等满一个完整请求周期去发现"地址写错了"体验很差。
+	if candidate.Timeout > 15*time.Second {
+		candidate.Timeout = 15 * time.Second
+	}
+	return candidate, nil
+}
+
+// describeProbeError 把探测过程中的错误翻成人话。
+func describeProbeError(err error) string {
+	var upErr *UpstreamError
+	if errors.As(err, &upErr) {
+		return upErr.Msg
+	}
+	return err.Error()
+}
+
+// handleSettingsLogin 用用户名 + 密码换 JWT，并顺带读出上游的下载器清单。
+//
+// 凭据处理红线（本项目最敏感的一段代码）：
+//   - 密码只在本次请求内使用，**绝不**写入配置文件、绝不写日志、绝不回显；
+//   - JWT 同样只活在本次请求里，用完即弃，不落盘；
+//   - 只有"下载器标识 + 显示名"这类非敏感结果会被缓存下来做下拉提示。
+//
+// 上游配置对象本身很可能含网盘 Cookie / 网盘账号，因此**绝不整段回传前端**。
+func (a *App) handleSettingsLogin(w http.ResponseWriter, r *http.Request) {
+	if !a.guardSameOriginJSON(w, r, "登录探测") {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeJSON(w, http.StatusBadRequest, settingsProbeResponse{Message: "表单解析失败"})
+		return
+	}
+
+	candidate, err := a.probeTarget(r)
+	if err != nil {
+		writeJSON(w, http.StatusOK, settingsProbeResponse{Message: "上游地址不合法：" + err.Error()})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), candidate.Timeout)
+	defer cancel()
+
+	client := NewAvdbClient(candidate)
+
+	// 已拿到 otp_token 说明这是两步验证的第二步。
+	if otpToken := strings.TrimSpace(r.PostFormValue("otp_token")); otpToken != "" {
+		jwt, err := client.Login2FA(ctx, otpToken, r.PostFormValue("otp_code"))
+		if err != nil {
+			writeJSON(w, http.StatusOK, settingsProbeResponse{Message: describeProbeError(err)})
+			return
+		}
+		a.respondWithDownloaders(w, r, candidate, client, jwt)
+		return
+	}
+
+	result, err := client.Login(ctx, r.PostFormValue("username"), r.PostFormValue("password"))
+	if err != nil {
+		writeJSON(w, http.StatusOK, settingsProbeResponse{Message: describeProbeError(err)})
+		return
+	}
+	if result.Needs2FA() {
+		writeJSON(w, http.StatusOK, settingsProbeResponse{
+			Need2FA:  true,
+			OTPToken: result.OTPToken,
+			Message:  "该账号开启了两步验证，请填写验证器上的动态码后继续。",
+		})
+		return
+	}
+	a.respondWithDownloaders(w, r, candidate, client, result.JWT)
+}
+
+// respondWithDownloaders 用 JWT 探测下载器清单，命中后缓存进配置以便下次直接给下拉提示。
+func (a *App) respondWithDownloaders(w http.ResponseWriter, r *http.Request, candidate Config, client *AvdbClient, jwt string) {
+	ctx, cancel := context.WithTimeout(r.Context(), candidate.Timeout)
+	defer cancel()
+
+	opts, trace, err := client.ProbeDownloaders(ctx, jwt)
+	if err != nil {
+		writeJSON(w, http.StatusOK, settingsProbeResponse{Message: describeProbeError(err), Trace: trace})
+		return
+	}
+	if len(opts) == 0 {
+		writeJSON(w, http.StatusOK, settingsProbeResponse{
+			Message: "登录成功，但上游配置里没有读出下载器清单。可手工填写标识，再用「校验并列出目录」确认是否有效。",
+			Trace:   trace,
+		})
+		return
+	}
+
+	next := candidate
+	next.DownloaderOptions = normalizeDownloaderOptions(opts)
+	// 缓存失败不影响本次结果，只是下次打开设置页看不到下拉提示。
+	if err := next.Save(); err != nil {
+		a.log.Warn("缓存下载器清单失败（不影响本次结果）", "err", err)
+	} else {
+		a.applyConfig(next)
+	}
+
+	writeJSON(w, http.StatusOK, settingsProbeResponse{
+		Success:     true,
+		Message:     fmt.Sprintf("登录成功，从上游读到 %d 个下载器。选中一个保存即可。", len(next.DownloaderOptions)),
+		Downloaders: next.DownloaderOptions,
+		Trace:       trace,
+	})
+}
+
+// handleSettingsDirectories 校验下载器标识是否有效，并列出其下的可选目录。
+//
+// 这一步只用到 API Key（上游对 /config/downloader/directories 标注的鉴权是
+// `API Key/JWT`），所以**不需要登录**。它把"填错下载器标识"从
+// "提交下载时才炸"提前到了"配置阶段就能发现"。
+func (a *App) handleSettingsDirectories(w http.ResponseWriter, r *http.Request) {
+	if !a.guardSameOriginJSON(w, r, "目录探测") {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeJSON(w, http.StatusBadRequest, settingsProbeResponse{Message: "表单解析失败"})
+		return
+	}
+
+	candidate, err := a.probeTarget(r)
+	if err != nil {
+		writeJSON(w, http.StatusOK, settingsProbeResponse{Message: "上游地址不合法：" + err.Error()})
+		return
+	}
+
+	downloaderID := strings.TrimSpace(r.PostFormValue("downloader_id"))
+	if downloaderID == "" {
+		downloaderID = candidate.Downloader
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), candidate.Timeout)
+	defer cancel()
+
+	dirs, err := NewAvdbClient(candidate).DownloaderDirectories(ctx, downloaderID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, settingsProbeResponse{
+			Message: fmt.Sprintf("下载器 %q 校验失败：%s", downloaderID, describeProbeError(err)),
+		})
+		return
+	}
+
+	message := fmt.Sprintf("下载器 %q 可用，读到 %d 个目录，可在「保存路径」里直接选。", downloaderID, len(dirs))
+	if len(dirs) == 0 {
+		message = fmt.Sprintf("下载器 %q 请求成功，但上游没有返回目录；保存路径留空即可。", downloaderID)
+	}
+
+	next := candidate
+	next.SavePathOptions = normalizeStringList(dirs, 100)
+	if err := next.Save(); err != nil {
+		a.log.Warn("缓存目录清单失败（不影响本次结果）", "err", err)
+	} else {
+		a.applyConfig(next)
+	}
+
+	writeJSON(w, http.StatusOK, settingsProbeResponse{
+		Success:     true,
+		Message:     message,
+		Directories: next.SavePathOptions,
+	})
 }
 
 // resolveSecret 统一处理密钥类字段的"留空即不修改"语义。

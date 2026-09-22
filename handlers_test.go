@@ -633,19 +633,22 @@ func TestDownloadSuccess(t *testing.T) {
 	}
 }
 
-// TestDownloadAlwaysSendsOptionalParams 是对线上 422 的回归测试。
+// TestDownloadNeverSendsEmptyDownloader 是线上两次报错的合并回归测试：
 //
-// 上游把 downloader / save_path 声明成了必填 query 参数（官方文档却写"选填"），
-// 旧实现只在非空时才拼这两个参数，于是"没配下载器/保存路径"的用户
-// 必然拿到 422 {"detail":[{"type":"missing","loc":["query","save_path"]...}]}。
-// 现在无论是否配置都必须发送，空值由上游解释为"继承全局设置"。
-func TestDownloadAlwaysSendsOptionalParams(t *testing.T) {
+//	第一阶段：旧实现只在非空时才拼参数 → 上游 422（缺 save_path）；
+//	第二阶段：改成"始终发送"，但 downloader 空着 → 上游回 `未找到下载器: ...`。
+//
+// 现在要守住的不变量有三条：
+//  1. tid / downloader / save_path 三个参数**始终发送**（满足上游的必填校验）；
+//  2. downloader **永不为空**——上游把空标识当作"查不到"，会直接拒绝；
+//  3. save_path 允许为空，留空表示交给上游决定。
+func TestDownloadNeverSendsEmptyDownloader(t *testing.T) {
 	var gotPath string
 	app := newTestApp(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.RequestURI()
 		_, _ = io.WriteString(w, `{"code":0,"message":"操作成功"}`)
 	}, func(c *Config) {
-		// 故意清空：模拟"用户什么都没填"的最常见部署。
+		// 故意清空：模拟"用户什么都没填"的最常见部署形态。
 		c.Downloader = ""
 		c.SavePath = ""
 	})
@@ -661,9 +664,11 @@ func TestDownloadAlwaysSendsOptionalParams(t *testing.T) {
 			t.Errorf("上游请求缺少 query 参数 %s（正是 422 的成因）: %s", key, gotPath)
 		}
 	}
-	if query.Get("downloader") != "" || query.Get("save_path") != "" {
-		t.Errorf("未配置时应传空值，实际 downloader=%q save_path=%q",
-			query.Get("downloader"), query.Get("save_path"))
+	if got := query.Get("downloader"); got != defaultDownloader {
+		t.Errorf("downloader 空值应补成内置默认值 %q，实际传了 %q", defaultDownloader, got)
+	}
+	if got := query.Get("save_path"); got != "" {
+		t.Errorf("save_path 留空时应传空值，实际传了 %q", got)
 	}
 }
 

@@ -30,7 +30,7 @@
 <main class="wrap wrap-narrow">
 
   <h1 class="page-title">设置</h1>
-  <p class="page-sub">配置上游 Avdb 服务地址与访问令牌。保存后立即生效，无需重启容器。</p>
+  <p class="page-sub">保存后立即生效，无需重启。</p>
 
   {{if .Saved}}
     <div class="alert alert-ok" role="status">
@@ -57,7 +57,6 @@
 
     <section class="panel">
       <h2>上游服务</h2>
-      <p class="panel-hint">Avdb 实例的对外地址。若反向代理带了路径前缀，请把前缀一并写进地址。</p>
 
       <div class="field-row">
         <label for="api_base_url">地址</label>
@@ -86,37 +85,63 @@
 
     <section class="panel">
       <h2>下载</h2>
-      <p class="panel-hint">
-        点击结果列表里的「下载」时，用下面两个参数提交给上游。
-        <strong>两项都留空</strong>即可：上游会把空值解释为「使用它自己配置好的全局下载器与保存目录」，
-        这也是最不容易填错的方式。
-      </p>
+      <p class="panel-hint">「下载器标识」要填上游认识的值，不确定就先校验，或登录上游读出清单。</p>
 
       <div class="field-row">
-        <label for="default_downloader">下载器</label>
+        <label for="default_downloader">下载器标识</label>
         <input type="text" id="default_downloader" name="default_downloader" value="{{.Downloader}}"
-               placeholder="留空 = 用上游全局下载器" spellcheck="false">
+               list="downloader-options" spellcheck="false">
       </div>
+      <datalist id="downloader-options">
+        {{range .DownloaderOptions}}<option value="{{.ID}}">{{if .Label}}{{.Label}}{{end}}</option>{{end}}
+      </datalist>
 
       <div class="field-row">
         <label for="default_save_path">保存路径</label>
         <input type="text" id="default_save_path" name="default_save_path" value="{{.SavePath}}"
-               placeholder="留空 = 用上游全局保存目录" spellcheck="false">
+               list="save-path-options" placeholder="留空 = 交给上游决定" spellcheck="false">
+      </div>
+      <datalist id="save-path-options">
+        {{range .SavePathOptions}}<option value="{{.}}"></option>{{end}}
+      </datalist>
+
+      <div class="field-actions">
+        <button type="button" class="btn btn-ghost" id="btn-check-downloader">校验下载器并列出目录</button>
+        <span class="test-result" id="downloader-result" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>从上游读取配置</h2>
+      <p class="panel-hint">下载器清单只能靠登录凭据读取，访问令牌无权调用。密码与 JWT 只在本次请求内使用，不落盘。</p>
+
+      <div class="field-row">
+        <label for="upstream_username">用户名</label>
+        <input type="text" id="upstream_username" autocomplete="username" spellcheck="false">
       </div>
 
-      <p class="panel-hint">
-        说明：可用下载器清单保存在上游的配置里，只能由<strong>登录凭据（用户名+密码换 JWT）</strong>读取，
-        访问令牌（API Key）无权访问 <code>/api/v1/config/{key}</code>，因此本站无法自动列出下载器。
-        填错时的报错会照实显示上游的校验详情，便于对照修正。
-      </p>
+      <div class="field-row">
+        <label for="upstream_password">密码</label>
+        <input type="password" id="upstream_password" autocomplete="current-password">
+      </div>
+
+      <div class="field-row is-hidden" id="otp-row">
+        <label for="upstream_otp">动态验证码</label>
+        <input type="text" id="upstream_otp" inputmode="numeric" autocomplete="one-time-code"
+               placeholder="验证器上的 6 位数字" spellcheck="false">
+      </div>
+
+      <div class="field-actions">
+        <button type="button" class="btn btn-ghost" id="btn-login">登录并获取下载器清单</button>
+        <span class="test-result" id="login-result" role="status" aria-live="polite"></span>
+      </div>
+
+      <div class="probe-trace is-hidden" id="login-trace"></div>
     </section>
 
     <section class="panel">
       <h2>访问控制</h2>
-      <p class="panel-hint">
-        设置口令后，所有页面都需要 <code>?token=口令</code> 才能访问；校验通过会写入 Cookie，后续免带。
-        把本站暴露到公网前务必设置，并建议同时在反向代理上再加一层认证。
-      </p>
+      <p class="panel-hint">设置后需用 <code>?token=口令</code> 访问，校验通过即写入 Cookie。公网部署建议同时在反向代理加一层认证。</p>
 
       <div class="field-row">
         <label for="access_token">访问口令</label>
@@ -164,10 +189,7 @@
       <dt>版本</dt><dd>{{.Version}}</dd>
       <dt>本站地址</dt><dd><code>{{.BaseURL}}</code></dd>
     </dl>
-    <p class="panel-hint">
-      容器部署时把宿主目录挂载到上述配置目录，配置就能在重启、重建镜像后保留。
-      密钥类字段以 0600 权限写入该目录下的 <code>config.json</code>。
-    </p>
+    <p class="panel-hint">容器部署请把宿主目录挂载到配置目录；密钥类字段以 0600 权限写入 <code>config.json</code>。</p>
   </section>
 
 </main>

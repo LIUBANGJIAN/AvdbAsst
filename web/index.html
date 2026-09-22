@@ -27,14 +27,14 @@
       <button type="submit">搜索</button>
     </form>
 
-    <nav class="topnav">
+    <nav class="topnav topnav-with-search">
       <a class="is-active" href="/">搜索</a>
       <a href="/settings">设置</a>
     </nav>
   </div>
 </header>
 
-<main class="wrap">
+<main class="wrap{{if and (not .Error) (not .Keyword)}} wrap-center{{end}}">
 
   {{if .Error}}
     <div class="alert alert-err" role="alert">
@@ -45,8 +45,14 @@
 
   {{if and (not .Error) (not .Keyword)}}
     <section class="hero">
+      <div class="hero-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="28" height="28" focusable="false">
+          <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/>
+          <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+      </div>
       <h1>Avdb 资源搜索</h1>
-      <p>在上方输入番号、标题或关键词开始检索。</p>
+      <p>输入番号、标题或关键词开始检索。</p>
 
       {{if .NeedSetup}}
         <div class="alert alert-warn" role="status">

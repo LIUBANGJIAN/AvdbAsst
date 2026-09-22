@@ -23,6 +23,18 @@ const (
 	defaultTimeoutSec = 20
 	defaultMaxResults = 500
 
+	// defaultDownloader 是内置的默认下载器标识。
+	//
+	// 为什么必须有个非空默认值：GET /api/v1/articles/download/manul 的 downloader
+	// 参数**不接受空串**。实测传空会返回 `未找到下载器: ...`（早期版本硬编码 115
+	// 时反而能正常提交，只是当时缺 save_path 才报 422）。
+	//
+	// 选 "115" 的依据：上游 API 文档里与下载器相关的路由只有
+	// /api/v1/config/downloader/115/** 这一族，说明 115 网盘是上游内建的下载器；
+	// 它同时是文档中唯一出现过的具体下载器标识。
+	// 用户可在设置页改成自己配置的标识，或登录上游后从清单里选。
+	defaultDownloader = "115"
+
 	configFileName = "config.json"
 
 	// envConfigDir 指定配置文件落盘目录。容器内固定为 /data，
@@ -48,12 +60,19 @@ type Config struct {
 	APIKey string `json:"api_key"`
 	// Downloader 提交离线下载时使用的下载器标识。
 	//
-	// 默认留空，空值由上游解释为"继承服务端全局下载器"。早期版本把它硬编码成
-	// "115"，但用户的 Avdb 未必配置了该标识——猜错就会换来一个看不懂的 422/500。
-	// 留空把选择权交给上游，是唯一不会猜错的默认值。
+	// **不能为空**：上游的 download/manul 把 downloader 当成必填的标识来查，
+	// 传空串会直接返回 `未找到下载器: ...`。空白值会被 normalizeConfig 补成
+	// defaultDownloader（115），而不是原样送上游。
 	Downloader string `json:"default_downloader"`
-	// SavePath 提交离线下载时的保存路径，留空表示继承上游全局保存目录。
+	// SavePath 提交离线下载时的保存路径，留空表示交给上游决定。
 	SavePath string `json:"default_save_path"`
+	// DownloaderOptions 是最近一次从上游探测到的下载器候选，仅供设置页做下拉提示。
+	//
+	// 只缓存"标识 + 显示名"这类非敏感字段：上游配置本身可能含网盘 Cookie，
+	// 绝不能整体缓存或回传前端。
+	DownloaderOptions []DownloaderOption `json:"downloader_options,omitempty"`
+	// SavePathOptions 是最近一次从上游列出的目录候选，同样是纯提示用途。
+	SavePathOptions []string `json:"save_path_options,omitempty"`
 	// Addr HTTP 监听地址。部署参数，仅环境变量生效。
 	Addr string `json:"listen_addr"`
 	// TimeoutSec 单次上游请求超时（秒）。
@@ -193,6 +212,13 @@ func normalizeConfig(cfg Config) Config {
 	cfg.SavePath = strings.TrimSpace(cfg.SavePath)
 	cfg.Addr = strings.TrimSpace(cfg.Addr)
 
+	// 空下载器必须补成默认值，不能留给上游——上游对空值的回应是
+	// "未找到下载器"，用户完全看不懂。放在这里（而不是 ResolveConfig 的默认值层）
+	// 是因为配置文件里的 "" 会覆盖默认值，只有后置整理才能拦住。
+	cfg.Downloader = withDownloaderDefault(cfg.Downloader)
+	cfg.DownloaderOptions = normalizeDownloaderOptions(cfg.DownloaderOptions)
+	cfg.SavePathOptions = normalizeStringList(cfg.SavePathOptions, 100)
+
 	if cfg.MaxResults <= 0 {
 		cfg.MaxResults = defaultMaxResults
 	}
@@ -212,6 +238,18 @@ func normalizeConfig(cfg Config) Config {
 	return cfg
 }
 
+// withDownloaderDefault 保证下载器标识非空。
+//
+// 抽成函数是为了让"归一化"与"构造期不变量"共用同一条规则——
+// 同一条业务规则写两遍，迟早会在某一次修改里走样。
+func withDownloaderDefault(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return defaultDownloader
+	}
+	return v
+}
+
 // normalizeAddr 把 "8080" 这类裸端口补成 ":8080"，避免 ListenAndServe 报错。
 func normalizeAddr(v string) string {
 	if v == "" {
@@ -221,6 +259,54 @@ func normalizeAddr(v string) string {
 		return v
 	}
 	return ":" + v
+}
+
+// normalizeDownloaderOptions 清洗下载器候选清单：去空白、去重、保序、限量。
+//
+// 保序是刻意的：上游清单的顺序有信息量（通常把默认项排在前面），
+// 用 map 去重再输出会打乱它，用户每次看到的顺序都不一样。
+func normalizeDownloaderOptions(in []DownloaderOption) []DownloaderOption {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]DownloaderOption, 0, len(in))
+	for _, opt := range in {
+		id := strings.TrimSpace(opt.ID)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, DownloaderOption{ID: id, Label: strings.TrimSpace(opt.Label)})
+		if len(out) >= maxHarvested {
+			break
+		}
+	}
+	return out
+}
+
+// normalizeStringList 清洗字符串清单：去空白、去重、保序、限量。
+func normalizeStringList(in []string, limit int) []string {
+	if limit <= 0 {
+		limit = 100
+	}
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 // Validate 校验配置的自洽性。缺失 API Key 不致命（上游可能未开启鉴权），
