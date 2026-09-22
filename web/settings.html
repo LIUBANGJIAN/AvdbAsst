@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="referrer" content="no-referrer">
+<title>设置 · Avdb 搜索</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/" aria-label="回到首页">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+        <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/>
+        <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      </svg>
+      <span>Avdb</span>
+    </a>
+    <nav class="topnav">
+      <a href="/">搜索</a>
+      <a class="is-active" href="/settings">设置</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap wrap-narrow">
+
+  <h1 class="page-title">设置</h1>
+  <p class="page-sub">配置上游 Avdb 服务地址与访问令牌。保存后立即生效，无需重启容器。</p>
+
+  {{if .Saved}}
+    <div class="alert alert-ok" role="status">
+      <strong>已保存</strong>
+      <span>配置已写入磁盘并即时生效。</span>
+    </div>
+  {{end}}
+
+  {{if .Error}}
+    <div class="alert" role="alert">
+      <strong>保存失败</strong>
+      <span>{{.Error}}</span>
+    </div>
+  {{end}}
+
+  {{if not .ConfigWritable}}
+    <div class="alert" role="alert">
+      <strong>配置目录不可写</strong>
+      <span>路径 <code>{{.ConfigDir}}</code> 无法写入，配置将无法保存。容器部署请确认已把卷挂载到该目录。</span>
+    </div>
+  {{end}}
+
+  <form method="post" action="/settings" id="settings-form" autocomplete="off">
+
+    <section class="panel">
+      <h2>上游服务</h2>
+      <p class="panel-hint">Avdb 实例的对外地址。若反向代理带了路径前缀，请把前缀一并写进地址。</p>
+
+      <div class="field-row">
+        <label for="api_base_url">地址</label>
+        <input type="text" id="api_base_url" name="api_base_url" value="{{.APIBaseURL}}"
+               placeholder="http://192.168.1.20:8000" spellcheck="false" required>
+      </div>
+
+      <div class="field-row">
+        <label for="api_key">API Key</label>
+        <input type="password" id="api_key" name="api_key" value=""
+               placeholder="{{if .HasAPIKey}}已配置：{{.APIKeyMasked}}（留空则不修改）{{else}}尚未配置，请粘贴访问令牌{{end}}"
+               autocomplete="new-password">
+      </div>
+      {{if .HasAPIKey}}
+        <div class="field-row field-row-inline">
+          <span class="field-spacer"></span>
+          <label class="checkbox"><input type="checkbox" name="clear_api_key" value="1"> 清除已保存的 API Key</label>
+        </div>
+      {{end}}
+
+      <div class="field-actions">
+        <button type="button" class="btn btn-ghost" id="btn-test">测试连接</button>
+        <span class="test-result" id="test-result" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>下载</h2>
+      <p class="panel-hint">点击搜索结果里的「下载」时，用这套参数提交给上游。</p>
+
+      <div class="field-row">
+        <label for="default_downloader">下载器</label>
+        <input type="text" id="default_downloader" name="default_downloader" value="{{.Downloader}}"
+               placeholder="115" spellcheck="false">
+      </div>
+
+      <div class="field-row">
+        <label for="default_save_path">保存路径</label>
+        <input type="text" id="default_save_path" name="default_save_path" value="{{.SavePath}}"
+               placeholder="留空表示使用上游默认目录" spellcheck="false">
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>访问控制</h2>
+      <p class="panel-hint">
+        设置口令后，所有页面都需要 <code>?token=口令</code> 才能访问；校验通过会写入 Cookie，后续免带。
+        把本站暴露到公网前务必设置，并建议同时在反向代理上再加一层认证。
+      </p>
+
+      <div class="field-row">
+        <label for="access_token">访问口令</label>
+        <input type="password" id="access_token" name="access_token" value=""
+               placeholder="{{if .HasAccessToken}}已配置：{{.AccessTokenMasked}}（留空则不修改）{{else}}留空表示不启用访问控制{{end}}"
+               autocomplete="new-password">
+      </div>
+      {{if .HasAccessToken}}
+        <div class="field-row field-row-inline">
+          <span class="field-spacer"></span>
+          <label class="checkbox"><input type="checkbox" name="clear_access_token" value="1"> 清除访问口令（服务将完全开放）</label>
+        </div>
+      {{end}}
+    </section>
+
+    <section class="panel">
+      <h2>高级</h2>
+
+      <div class="field-row">
+        <label for="timeout_seconds">请求超时</label>
+        <input type="number" id="timeout_seconds" name="timeout_seconds" value="{{.TimeoutSec}}"
+               min="1" max="600" step="1">
+        <span class="field-unit">秒</span>
+      </div>
+
+      <div class="field-row">
+        <label for="max_results">结果上限</label>
+        <input type="number" id="max_results" name="max_results" value="{{.MaxResults}}"
+               min="1" max="5000" step="1">
+        <span class="field-unit">条</span>
+      </div>
+    </section>
+
+    <div class="form-actions">
+      <button type="submit" class="btn btn-primary">保存设置</button>
+      <a class="btn btn-ghost" href="/">返回搜索</a>
+    </div>
+  </form>
+
+  <section class="panel panel-muted">
+    <h2>运行信息</h2>
+    <dl class="kv kv-wide">
+      <dt>配置文件</dt><dd><code>{{.ConfigPath}}</code></dd>
+      <dt>配置目录</dt><dd><code>{{.ConfigDir}}</code>{{if .ConfigWritable}}（可写）{{else}}（<strong>不可写</strong>）{{end}}</dd>
+      <dt>版本</dt><dd>{{.Version}}</dd>
+      <dt>本站地址</dt><dd><code>{{.BaseURL}}</code></dd>
+    </dl>
+    <p class="panel-hint">
+      容器部署时把宿主目录挂载到上述配置目录，配置就能在重启、重建镜像后保留。
+      密钥类字段以 0600 权限写入该目录下的 <code>config.json</code>。
+    </p>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <span>Avdb 搜索 · {{.Version}}</span>
+</footer>
+
+<script src="/static/settings.js" defer></script>
+</body>
+</html>

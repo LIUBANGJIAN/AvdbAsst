@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="referrer" content="no-referrer">
+<title>{{if .Keyword}}{{.Keyword}} · {{end}}Avdb 搜索</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="search" type="application/opensearchdescription+xml" title="Avdb 搜索" href="/opensearch.xml">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="/" aria-label="回到首页">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+        <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/>
+        <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+      </svg>
+      <span>Avdb</span>
+    </a>
+
+    <form class="search" action="/s" method="get" role="search">
+      <input type="search" name="q" id="q" value="{{.Keyword}}" placeholder="输入番号、标题或关键词…" autocomplete="off" spellcheck="false" autofocus aria-label="搜索关键词">
+      <button type="submit">搜索</button>
+    </form>
+
+    <nav class="topnav">
+      <a class="is-active" href="/">搜索</a>
+      <a href="/settings">设置</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  {{if .Error}}
+    <div class="alert" role="alert">
+      <strong>搜索失败</strong>
+      <span>{{.Error}}</span>
+    </div>
+  {{end}}
+
+  {{if and (not .Error) (not .Keyword)}}
+    <section class="hero">
+      <h1>Avdb 资源搜索</h1>
+      <p>在上方输入关键词开始检索。把你常用的查询加进浏览器的自定义搜索引擎，选中文字右键即可直接搜。</p>
+
+      {{if .NeedSetup}}
+        <div class="alert alert-warn" role="status">
+          <strong>还没配置上游服务</strong>
+          <span>请先前往 <a href="/settings">设置</a> 填写 Avdb 地址与 API Key，否则搜索会返回 401。</span>
+        </div>
+      {{end}}
+
+      <div class="hero-grid">
+        <div class="hero-card">
+          <h2>浏览器一键添加</h2>
+          <p>点击下方链接，浏览器会提示把本站加入搜索引擎列表。</p>
+          <a class="btn btn-primary" href="/opensearch.xml">添加为搜索引擎</a>
+        </div>
+
+        <div class="hero-card">
+          <h2>手动配置</h2>
+          <p>在「设置 → 搜索引擎 → 管理搜索引擎 → 添加」中填入：</p>
+          <dl class="kv">
+            <dt>名称</dt><dd>Avdb</dd>
+            <dt>快捷词</dt><dd>av</dd>
+            <dt>网址</dt><dd><code>{{.SearchTemplate}}</code></dd>
+          </dl>
+        </div>
+
+        <div class="hero-card">
+          <h2>右键插件 / 自定义菜单</h2>
+          <p>把请求地址里的占位符换成插件要求的写法即可，服务端都支持：</p>
+          <ul class="plain">
+            <li><code>/s?q=%s</code>　Chrome / Edge / Firefox</li>
+            <li><code>/s?q={searchTerms}</code>　OpenSearch</li>
+            <li><code>/s?q={{"{{ q }}"}}</code>　自定义插件模板</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+  {{end}}
+
+  {{if and (not .Error) .Keyword (not .Torrents)}}
+    <div class="empty">
+      <h2>没有找到相关结果</h2>
+      <p>关键词「{{.Keyword}}」没有匹配到任何资源，换个写法试试。</p>
+    </div>
+  {{end}}
+
+  {{if .Torrents}}
+    <section class="toolbar" aria-label="筛选与排序">
+      <div class="field">
+        <label for="f-site">站点</label>
+        <select id="f-site">
+          <option value="">全部</option>
+          {{range .Sites}}<option value="{{.}}">{{.}}</option>{{end}}
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="f-section">板块</label>
+        <select id="f-section">
+          <option value="">全部</option>
+          {{range .Sections}}<option value="{{.}}">{{.}}</option>{{end}}
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="f-category">分类</label>
+        <select id="f-category">
+          <option value="">全部</option>
+          {{range .Categories}}<option value="{{.}}">{{.}}</option>{{end}}
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="f-sort">排序</label>
+        <select id="f-sort">
+          <option value="default">默认</option>
+          <option value="seeders">做种最多</option>
+          <option value="size-desc">体积从大到小</option>
+          <option value="size-asc">体积从小到大</option>
+          <option value="time-desc">最新发布</option>
+          <option value="time-asc">最早发布</option>
+        </select>
+      </div>
+
+      <div class="chips" role="group" aria-label="属性筛选">
+        <button type="button" class="chip" data-flag="cn" aria-pressed="false">中文字幕</button>
+        <button type="button" class="chip" data-flag="unc" aria-pressed="false">无码</button>
+        <button type="button" class="chip" data-flag="uhd" aria-pressed="false">4K</button>
+        <button type="button" class="chip" data-flag="hd" aria-pressed="false">高清</button>
+        <button type="button" class="chip" data-flag="free" aria-pressed="false">免费</button>
+      </div>
+
+      <button type="button" class="btn btn-ghost" id="f-reset">重置</button>
+    </section>
+
+    <p class="stats">
+      共 <strong id="result-count">{{len .Torrents}}</strong> 条结果
+      {{if .Truncated}}<span class="stats-warn">（结果过多，仅显示前 {{len .Torrents}} 条）</span>{{end}}
+    </p>
+
+    <section class="grid" id="results">
+      {{range $i, $t := .Torrents}}
+        <article class="card"
+          data-order="{{$i}}"
+          data-site="{{$t.Site}}"
+          data-section="{{$t.Section}}"
+          data-category="{{$t.Category}}"
+          data-flags="{{flags $t}}"
+          data-size="{{$t.SizeMB}}"
+          data-seeders="{{$t.Seeders}}"
+          data-ts="{{$t.SortTS}}">
+
+          <div class="thumb">
+            {{if $t.PreviewImage}}
+              <img src="{{$t.PreviewImage}}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">
+            {{end}}
+            <div class="thumb-fallback"{{if $t.PreviewImage}} hidden{{end}}>
+              <span>{{dash $t.Site}}</span>
+            </div>
+            <span class="thumb-size">{{formatSize $t.SizeMB}}</span>
+          </div>
+
+          <div class="card-body">
+            <h3 class="card-title" title="{{$t.Title}}">{{$t.Title}}</h3>
+
+            <div class="card-tags">
+              {{if $t.Chinese}}<span class="tag t-cn">中文字幕</span>{{end}}
+              {{if $t.Uncensored}}<span class="tag t-unc">无码</span>{{end}}
+              {{if $t.UHD}}<span class="tag t-uhd">4K</span>{{end}}
+              {{if $t.HD}}<span class="tag t-hd">高清</span>{{end}}
+              {{if $t.Free}}<span class="tag t-free">免费</span>{{end}}
+            </div>
+
+            <div class="card-meta">
+              <span class="site">{{dash $t.Site}}</span>
+              {{if $t.Section}}<span class="dot">·</span><span>{{$t.Section}}</span>{{end}}
+              {{if $t.Category}}<span class="dot">·</span><span>{{$t.Category}}</span>{{end}}
+            </div>
+
+            <div class="card-sub">
+              <span>{{if gt $t.Seeders 0}}做种 {{$t.Seeders}}{{else}}无做种信息{{end}}</span>
+              {{/* 展示上游原样的发布日期，title 里挂原始时间串便于核对 */}}
+              <span{{if $t.PostTime}} title="{{$t.PostTime}}"{{end}}>{{formatDate $t.PostTime}}</span>
+            </div>
+          </div>
+
+          <div class="card-actions">
+            <button type="button" class="btn btn-primary" data-act="download" data-tid="{{$t.ID}}">下载</button>
+            {{if $t.DownloadURL}}<button type="button" class="btn btn-ghost" data-act="copy" data-magnet="{{$t.DownloadURL}}">复制磁链</button>{{end}}
+            <span class="status" data-status-for="{{$t.ID}}" role="status" aria-live="polite"></span>
+          </div>
+        </article>
+      {{end}}
+    </section>
+
+    <div class="empty" id="no-match" hidden>
+      <h2>当前筛选条件下没有结果</h2>
+      <p>试试放宽站点、板块或属性筛选。</p>
+    </div>
+  {{end}}
+
+</main>
+
+<footer class="foot">
+  <span>Avdb 搜索 · {{.Version}}</span>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="/static/app.js" defer></script>
+</body>
+</html>

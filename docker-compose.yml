@@ -1,0 +1,52 @@
+services:
+  avdbasst:
+    image: liubangjian/avdbasst:latest
+    # 想从源码构建就把上面这行注释掉、启用下面这行：
+    # build: .
+    container_name: avdbasst
+    restart: unless-stopped
+
+    ports:
+      # 左边是宿主端口，可按需修改；右边固定 8080（容器内）
+      - "8080:8080"
+
+    volumes:
+      # ---------------------------------------------------------------
+      # 目录持久化：上游地址、API Key、访问口令等配置都会写到 /data。
+      # 把它挂到宿主目录，容器重建 / 镜像升级都不会丢配置。
+      # ---------------------------------------------------------------
+      - ./data:/data
+
+    environment:
+      TZ: Asia/Shanghai
+      # 配置目录固定为 /data，与上面的挂载点一致
+      AVDB_CONFIG_DIR: /data
+
+      # ---------------------------------------------------------------
+      # 下面这些只是「首次启动的初值」。
+      #
+      # 启动后可以在 http://<你的地址>:8080/settings 页面里修改并保存；
+      # 一旦保存过，就以此后 /data/config.json 里的内容为准，
+      # 这里再改动不会再覆盖页面上的设置（见 README「配置优先级」）。
+      #
+      # 因此推荐做法是：首次直接打开页面填写，不用在这里写令牌——
+      # 免得明文凭证散落在 compose 文件和 shell 历史里。
+      # ---------------------------------------------------------------
+      # AVDB_API_BASE_URL: "http://192.168.1.20:8000"
+      # AVDB_API_KEY: "在此填入访问令牌"
+      # AVDB_ACCESS_TOKEN: "给本站设置的访问口令（可选）"
+      # AVDB_MAX_RESULTS: "500"
+      # AVDB_TIMEOUT_SECONDS: "20"
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

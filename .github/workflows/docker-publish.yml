@@ -1,0 +1,121 @@
+name: Build and Push Image
+
+# 推送到主分支或打版本标签时自动构建并推送镜像；
+# PR 只跑测试，不推镜像。
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Docker Hub 上的镜像名（必须全小写，Docker 不接受大写仓库名）。
+  # 仓库 Secrets 里配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN 即可。
+  IMAGE_NAME: avdbasst
+
+jobs:
+  # ---------------------------------------------------------------- 测试
+  test:
+    name: 测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 静态检查
+        run: go vet ./...
+
+      - name: 格式检查
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt："
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # 带竞态检测。本项目有"设置页面在线改写配置 + 并发请求"的场景，
+      # 不跑 -race 等于没测这一块。
+      - name: 单元测试（含竞态检测）
+        run: go test -race -count=1 ./...
+
+      - name: 编译验证
+        run: go build -trimpath -o /dev/null .
+
+  # ------------------------------------------------------- 构建并推送镜像
+  build:
+    name: 构建并推送镜像
+    needs: test
+    # PR 不推镜像，只在 push / 手动触发时执行
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 准备 QEMU（用于跨架构构建 arm64）
+        uses: docker/setup-qemu-action@v3
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # 主分支推 latest
+            type=raw,value=latest,enable={{is_default_branch}}
+            # v1.2.3 -> 1.2.3 / 1.2 / 1
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            # 分支名（非主分支）
+            type=ref,event=branch
+            # 每个提交一个 sha 标签，便于精确回滚
+            type=sha,prefix=sha-,format=short
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # amd64 给服务器/NAS，arm64 给 ARM 架构的 NAS 和树莓派
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GitHub Actions 原生缓存，显著加快重复构建
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            VERSION=${{ github.ref_name }}
+
+      - name: 输出摘要
+        run: |
+          {
+            echo "### 镜像已推送"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,10 @@
+{
+  "api_base_url": "http://192.168.1.20:8000",
+  "api_key": "在此填入你的上游 API Key",
+  "default_downloader": "115",
+  "default_save_path": "",
+  "listen_addr": ":8080",
+  "timeout_seconds": 20,
+  "max_results": 500,
+  "access_token": ""
+}

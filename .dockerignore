@@ -1,0 +1,33 @@
+# 版本控制与 CI：构建上下文里不需要，也会白白拖慢传输
+.git
+.github
+.gitattributes
+.gitignore
+
+# 凭据绝不能进入镜像层
+config.json
+data/
+我的api.txt
+docker.token.txt
+*.token.txt
+*.secret.txt
+.env
+.env.*
+
+# 旧实现备份
+.backup/
+
+# 文档
+README.md
+API接口.md
+API接口2.md
+
+# 构建产物与日志
+avdbasst
+avdbasst.exe
+dist/
+out/
+*.log
+
+# 开发期间的本地 compose 覆盖文件
+docker-compose.override.yml
