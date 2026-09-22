@@ -219,6 +219,7 @@ http://<你的地址>:8080/s?q=关键词&token=你的口令
 | `AVDB_MAX_RESULTS` | `500` | 单次搜索展示上限（1–5000） |
 | `AVDB_ADDR` | `:8080` | 监听地址（部署参数，仅环境变量生效） |
 | `AVDB_CONFIG_DIR` | `.` | 配置目录（容器内已是 `/data`） |
+| `AVDB_DISABLE_ORIGIN_CHECK` | 空 | 设为 `1` 关闭来源校验（仅用于反向代理无法回传原始主机时的应急，会削弱 CSRF 防护） |
 | `PORT` | — | `AVDB_ADDR` 未设时的备选 |
 | `TZ` | — | 时区，影响日志时间戳 |
 
@@ -365,6 +366,28 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o avdbasst-arm64 .
 配置目录不可写。用 `docker compose logs avdbasst` 看具体错误；
 常见原因是宿主机目录属主不对。镜像入口脚本会在以 root 启动时
 自动对齐 `/data` 属主，若仍然失败请检查挂载是否为只读。
+
+**保存设置返回 403「跨站请求被拒绝」**
+
+服务端会校验请求来源，防止别的网站借你的浏览器改配置。若本站部署在反向代理后面，
+而代理没有把原始主机名回传给后端，就会出现「页面打得开、一保存就 403」——
+后端看到的 `Host` 是内部地址，浏览器的 `Origin` 却是外部域名，两边对不上。
+
+让代理回传原始主机即可，Nginx 示例：
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Real-IP $remote_addr;
+}
+```
+
+403 页面会直接列出实际收到的 `Origin` / `Referer` / `Host` / `X-Forwarded-Host`，
+照着对比即可定位。若确认同源却仍被拦截，可临时设 `AVDB_DISABLE_ORIGIN_CHECK=1`
+关闭该校验——注意这会同时关掉这一层 CSRF 纵深防御，不建议长期开启。
 
 **缩略图不显示**
 

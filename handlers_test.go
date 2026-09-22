@@ -1055,6 +1055,104 @@ func TestSettingsSaveAcceptsNonBrowserClient(t *testing.T) {
 	}
 }
 
+// TestSameOriginMatrix 穷举来源判定的各类真实场景。
+//
+// 这张表来自一次真实故障：用户保存设置必然 403。根因是 sameOrigin 只认 r.Host，
+// 而反向代理转发时 r.Host 是后端内部地址、浏览器的 Origin 却是外部域名；
+// 同一项目的 requestBase() 却信任 X-Forwarded-Host —— 两处对"本站"的口径不一致。
+// 因此下面的"反代""端口规范化"用例都是回归用例，防止判据被再次收窄。
+func TestSameOriginMatrix(t *testing.T) {
+	cases := []struct {
+		name      string
+		host      string
+		origin    string
+		referer   string
+		forwarded string
+		want      bool
+	}{
+		// ---- 直连：基线，行为不得回归 ----
+		{"直连 Origin 一致", "127.0.0.1:8080", "http://127.0.0.1:8080", "", "", true},
+		{"直连 仅有同源 Referer", "127.0.0.1:8080", "", "http://127.0.0.1:8080/settings", "", true},
+		{"直连 无任何来源信息", "127.0.0.1:8080", "", "", "", true},
+
+		// ---- 反向代理：本次故障的核心场景 ----
+		{"反代 代理回传原始主机", "127.0.0.1:8080", "http://nas.example.com:5000", "http://nas.example.com:5000/settings", "nas.example.com:5000", true},
+		{"HTTPS 反代 代理回传原始主机", "127.0.0.1:8080", "https://avdb.example.com", "https://avdb.example.com/settings", "avdb.example.com", true},
+		{"反代 代理未回传任何外部主机", "127.0.0.1:8080", "http://nas.example.com:5000", "", "", false},
+
+		// ---- Origin: null（隐私上下文、沙箱 iframe）----
+		{"Origin 为 null 且有同源 Referer", "127.0.0.1:8080", "null", "http://127.0.0.1:8080/settings", "", true},
+		{"Origin 为 null 且无 Referer", "127.0.0.1:8080", "null", "", "", true},
+
+		// ---- 主机名与端口规范化 ----
+		{"Host 带默认端口 80", "example.com:80", "http://example.com", "", "", true},
+		{"Host 带默认端口 443", "example.com:443", "https://example.com", "", "", true},
+		{"主机名大小写不同", "Example.COM:8080", "http://example.com:8080", "", "", true},
+		{"主机名带尾点", "example.com.", "http://example.com", "", "", true},
+		{"非默认端口不同 应拒绝", "127.0.0.1:8080", "http://127.0.0.1:9090", "", "", false},
+
+		// ---- 真实跨站：必须始终拒绝 ----
+		{"跨站 Origin", "127.0.0.1:8080", "http://evil.example.com", "http://evil.example.com/attack", "", false},
+		{"跨站 仅靠 Referer 兜底", "127.0.0.1:8080", "", "http://evil.example.com/attack", "", false},
+		{"跨站 同端口不同主机", "127.0.0.1:8080", "http://192.168.1.99:8080", "", "", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/settings", nil)
+			req.Host = c.host
+			if c.origin != "" {
+				req.Header.Set("Origin", c.origin)
+			}
+			if c.referer != "" {
+				req.Header.Set("Referer", c.referer)
+			}
+			if c.forwarded != "" {
+				req.Header.Set("X-Forwarded-Host", c.forwarded)
+			}
+			if got := sameOrigin(req); got != c.want {
+				t.Errorf("sameOrigin() = %v, 期望 %v（Host=%q Origin=%q Referer=%q XFH=%q）",
+					got, c.want, c.host, c.origin, c.referer, c.forwarded)
+			}
+		})
+	}
+}
+
+// TestSettingsSaveThroughReverseProxy 端到端锁定本次故障：
+// 请求经反向代理到达，r.Host 是后端内部地址，浏览器 Origin 是外部域名，
+// 代理用 X-Forwarded-Host 回传原始主机。修复前此用例必然 403。
+func TestSettingsSaveThroughReverseProxy(t *testing.T) {
+	dir := t.TempDir()
+	app := newTestApp(t, upstreamWith(upstreamSample), func(c *Config) { c.ConfigDir = dir })
+
+	body := url.Values{"api_base_url": {"http://upstream.internal:8999"}}.Encode()
+	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://nas.example.com:5000")
+	req.Header.Set("Referer", "http://nas.example.com:5000/settings")
+	req.Header.Set("X-Forwarded-Host", "nas.example.com:5000")
+	req.Header.Set("X-Forwarded-Proto", "http")
+	req.Host = "127.0.0.1:8080" // 代理转发后后端看到的 Host
+
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusSeeOther {
+		t.Fatalf("反代场景保存状态码 = %d, 期望 303\n响应正文：%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOriginCheckEscapeHatch 逃生舱：极端部署下可显式关闭来源校验。
+func TestOriginCheckEscapeHatch(t *testing.T) {
+	t.Setenv("AVDB_DISABLE_ORIGIN_CHECK", "1")
+	req := httptest.NewRequest(http.MethodPost, "/settings", nil)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Origin", "http://totally-unrelated.example.com")
+	if !sameOrigin(req) {
+		t.Error("设置 AVDB_DISABLE_ORIGIN_CHECK=1 后仍被来源校验拦截")
+	}
+}
+
 // TestSettingsSaveSetsCookieForNewToken 覆盖一个很容易踩的坑：
 // 用户刚在页面上设置访问口令，紧接着的 303 跳转会被这个新口令拦住，
 // 表现为"改完就进不去了"。必须在响应里同步下发 Cookie。

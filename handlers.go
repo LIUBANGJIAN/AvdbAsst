@@ -12,8 +12,10 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -212,7 +214,9 @@ func (a *App) securityMW(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Referrer-Policy", "no-referrer")
+		// same-origin 而非 no-referrer：跨站跳转依旧不泄露本站地址，
+		// 但同源请求会带上 Referer，sameOrigin 才能拿它做 Origin 缺失时的兜底判据。
+		h.Set("Referrer-Policy", "same-origin")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Content-Security-Policy", strings.Join([]string{
 			"default-src 'none'",
@@ -670,8 +674,13 @@ func (a *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	// 纵深防御：SameSite=Lax 已经挡住跨站表单携带 Cookie，
 	// 但在"未设置访问口令"的场景下根本没有 Cookie 可挡，必须再校验来源。
 	if !sameOrigin(r) {
-		a.log.Warn("拒绝跨站设置提交", "origin", r.Header.Get("Origin"), "referer", r.Header.Get("Referer"))
-		http.Error(w, "403 跨站请求被拒绝", http.StatusForbidden)
+		a.log.Warn("拒绝跨站设置提交",
+			"origin", r.Header.Get("Origin"),
+			"referer", r.Header.Get("Referer"),
+			"host", r.Host,
+			"x_forwarded_host", r.Header.Get("X-Forwarded-Host"),
+		)
+		http.Error(w, "403 跨站请求被拒绝\n\n"+originDiagnosis(r), http.StatusForbidden)
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -735,7 +744,16 @@ func (a *App) renderSettingsError(w http.ResponseWriter, r *http.Request, cfg Co
 // 让用户在保存之前就能确认配置是否正确。
 func (a *App) handleSettingsTest(w http.ResponseWriter, r *http.Request) {
 	if !sameOrigin(r) {
-		writeJSON(w, http.StatusForbidden, downloadResponse{Success: false, Message: "跨站请求被拒绝"})
+		a.log.Warn("拒绝跨站测试请求",
+			"origin", r.Header.Get("Origin"),
+			"referer", r.Header.Get("Referer"),
+			"host", r.Host,
+			"x_forwarded_host", r.Header.Get("X-Forwarded-Host"),
+		)
+		writeJSON(w, http.StatusForbidden, downloadResponse{
+			Success: false,
+			Message: "跨站请求被拒绝。" + originDiagnosis(r),
+		})
 		return
 	}
 	if err := r.ParseForm(); err != nil {
@@ -810,22 +828,115 @@ func clampInt(v, low, high int) int {
 
 // sameOrigin 校验请求确实来自本站，用于所有会改状态的非幂等接口。
 //
-// 判定规则：优先看 Origin；没有 Origin 时退回 Referer；
-// 两者都没有说明不是浏览器发起的（curl、脚本），交给上层鉴权决定。
+// 判定"本站"的候选主机必须与 requestBase() 保持一致 —— 它同样信任
+// X-Forwarded-Host。此前两处对"本站"的定义不一致，导致一个自相矛盾的故障：
+// 反向代理下页面能正常打开（requestBase 认 X-Forwarded-Host），
+// 但保存设置必被 403（sameOrigin 只认 r.Host，而 r.Host 是代理转发时的内部地址）。
+//
+// 判定规则：
+//  1. 取来源主机：优先 Origin；Origin 缺失或为 "null"（隐私上下文、沙箱 iframe）时退回 Referer。
+//  2. 与本地候选主机（X-Forwarded-Host、Host）逐一比较，端口按默认值归一化。
+//  3. 完全取不到来源信息时放行 —— 那不是浏览器发起的（curl、脚本），交由鉴权把关。
+//     浏览器发起的跨站请求必带 Origin，且 SameSite=Lax 已阻止其携带 Cookie。
 func sameOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		referer := r.Header.Get("Referer")
-		if referer == "" {
+	if originCheckDisabled() {
+		return true
+	}
+	source := originHost(r)
+	if source == "" {
+		return true
+	}
+	for _, candidate := range localHosts(r) {
+		if hostEqual(source, candidate) {
 			return true
 		}
-		origin = referer
 	}
-	parsed, err := url.Parse(origin)
-	if err != nil || parsed.Host == "" {
+	return false
+}
+
+// originHost 提取请求来源的主机（host[:port]）。
+func originHost(r *http.Request) string {
+	if origin := firstHeaderValue(r.Header.Get("Origin")); origin != "" && !strings.EqualFold(origin, "null") {
+		if host := hostOf(origin); host != "" {
+			return host
+		}
+	}
+	// Referer 兜底：仅在 Origin 缺失或为 "null" 时才有意义。
+	return hostOf(firstHeaderValue(r.Header.Get("Referer")))
+}
+
+// localHosts 返回"本站"的全部候选主机，与 requestBase() 的口径一致。
+func localHosts(r *http.Request) []string {
+	hosts := make([]string, 0, 2)
+	if h := firstHeaderValue(r.Header.Get("X-Forwarded-Host")); h != "" {
+		hosts = append(hosts, h)
+	}
+	if r.Host != "" {
+		hosts = append(hosts, r.Host)
+	}
+	return hosts
+}
+
+// hostOf 从 URL 文本中解析出主机部分，解析失败返回空串。
+func hostOf(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// hostEqual 比较两个 host[:port] 是否等价。
+//
+// 忽略 scheme（TLS 常常终止在反向代理上，浏览器看到 https、后端只看到 http），
+// 并把 80/443 视同缺省端口，避免 "example.com:80" 与 "example.com" 被判为不同主机。
+func hostEqual(a, b string) bool {
+	hostA, portA := splitHostPort(a)
+	hostB, portB := splitHostPort(b)
+	if hostA == "" || hostB == "" {
 		return false
 	}
-	return strings.EqualFold(parsed.Host, r.Host)
+	return strings.EqualFold(hostA, hostB) && portA == portB
+}
+
+// splitHostPort 拆分主机与端口，默认端口（80/443）归一化为空串。
+func splitHostPort(s string) (host, port string) {
+	s = strings.TrimSuffix(strings.TrimSpace(s), ".")
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		// 不含端口；IPv6 因缺少方括号也会落到这里，统一去掉括号便于比较。
+		return strings.Trim(s, "[]"), ""
+	}
+	switch port {
+	case "80", "443":
+		port = ""
+	}
+	return host, port
+}
+
+// originCheckDisabled 是给极端部署环境留的逃生舱：默认开启来源校验。
+// 仅当显式设置 AVDB_DISABLE_ORIGIN_CHECK=1 时关闭。
+func originCheckDisabled() bool {
+	v := strings.TrimSpace(os.Getenv("AVDB_DISABLE_ORIGIN_CHECK"))
+	return v == "1" || strings.EqualFold(v, "true")
+}
+
+// originDiagnosis 在来源校验失败时输出可自助排查的现场信息。
+//
+// 只回一句"跨站请求被拒绝"会让部署在反向代理后的用户无从下手，
+// 把代理配置疏漏误判成程序缺陷 —— 这正是本次故障的教训。
+func originDiagnosis(r *http.Request) string {
+	var b strings.Builder
+	b.WriteString("来源校验未通过。实际收到的请求头如下，请对照排查：\n\n")
+	fmt.Fprintf(&b, "  Origin           : %q\n", r.Header.Get("Origin"))
+	fmt.Fprintf(&b, "  Referer          : %q\n", r.Header.Get("Referer"))
+	fmt.Fprintf(&b, "  Host             : %q\n", r.Host)
+	fmt.Fprintf(&b, "  X-Forwarded-Host : %q\n", r.Header.Get("X-Forwarded-Host"))
+	b.WriteString("\n若经由反向代理访问，请让代理回传原始主机，例如 Nginx：\n\n")
+	b.WriteString("  proxy_set_header Host $host;\n")
+	b.WriteString("  proxy_set_header X-Forwarded-Host $host;\n")
+	b.WriteString("\n确属同源却被拦截时，可设环境变量 AVDB_DISABLE_ORIGIN_CHECK=1 关闭该校验。\n")
+	return b.String()
 }
 
 // setAuthCookie 下发访问口令 Cookie，供后续请求复用。
