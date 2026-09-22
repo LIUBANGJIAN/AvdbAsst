@@ -19,9 +19,6 @@ const (
 	// defaultAPIBaseURL 只是占位。真实地址请在部署时通过环境变量或页面配置。
 	defaultAPIBaseURL = "http://127.0.0.1:8999"
 
-	// defaultDownloader 与上游约定一致（RawManualDownloadPayload 的默认值就是 115）。
-	defaultDownloader = "115"
-
 	// 上游请求默认超时（秒）与结果条数上限。
 	defaultTimeoutSec = 20
 	defaultMaxResults = 500
@@ -49,9 +46,13 @@ type Config struct {
 	APIBaseURL string `json:"api_base_url"`
 	// APIKey 上游鉴权用的 X-API-Key。
 	APIKey string `json:"api_key"`
-	// Downloader 提交离线下载时使用的下载器标识（默认 115）。
+	// Downloader 提交离线下载时使用的下载器标识。
+	//
+	// 默认留空，空值由上游解释为"继承服务端全局下载器"。早期版本把它硬编码成
+	// "115"，但用户的 Avdb 未必配置了该标识——猜错就会换来一个看不懂的 422/500。
+	// 留空把选择权交给上游，是唯一不会猜错的默认值。
 	Downloader string `json:"default_downloader"`
-	// SavePath 提交离线下载时的保存路径，留空表示用上游默认值。
+	// SavePath 提交离线下载时的保存路径，留空表示继承上游全局保存目录。
 	SavePath string `json:"default_save_path"`
 	// Addr HTTP 监听地址。部署参数，仅环境变量生效。
 	Addr string `json:"listen_addr"`
@@ -95,7 +96,6 @@ func ResolveConfig() (Config, []string) {
 
 	cfg := Config{
 		APIBaseURL: defaultAPIBaseURL,
-		Downloader: defaultDownloader,
 		Addr:       defaultAddr,
 		TimeoutSec: defaultTimeoutSec,
 		MaxResults: defaultMaxResults,

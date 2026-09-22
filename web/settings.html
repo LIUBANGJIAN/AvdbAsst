@@ -86,19 +86,29 @@
 
     <section class="panel">
       <h2>下载</h2>
-      <p class="panel-hint">点击搜索结果里的「下载」时，用这套参数提交给上游。</p>
+      <p class="panel-hint">
+        点击结果列表里的「下载」时，用下面两个参数提交给上游。
+        <strong>两项都留空</strong>即可：上游会把空值解释为「使用它自己配置好的全局下载器与保存目录」，
+        这也是最不容易填错的方式。
+      </p>
 
       <div class="field-row">
         <label for="default_downloader">下载器</label>
         <input type="text" id="default_downloader" name="default_downloader" value="{{.Downloader}}"
-               placeholder="115" spellcheck="false">
+               placeholder="留空 = 用上游全局下载器" spellcheck="false">
       </div>
 
       <div class="field-row">
         <label for="default_save_path">保存路径</label>
         <input type="text" id="default_save_path" name="default_save_path" value="{{.SavePath}}"
-               placeholder="留空表示使用上游默认目录" spellcheck="false">
+               placeholder="留空 = 用上游全局保存目录" spellcheck="false">
       </div>
+
+      <p class="panel-hint">
+        说明：可用下载器清单保存在上游的配置里，只能由<strong>登录凭据（用户名+密码换 JWT）</strong>读取，
+        访问令牌（API Key）无权访问 <code>/api/v1/config/{key}</code>，因此本站无法自动列出下载器。
+        填错时的报错会照实显示上游的校验详情，便于对照修正。
+      </p>
     </section>
 
     <section class="panel">

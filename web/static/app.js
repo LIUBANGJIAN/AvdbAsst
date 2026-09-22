@@ -22,16 +22,6 @@
     toastTimer = setTimeout(function () { toastEl.hidden = true; }, 2000);
   }
 
-  /* -------------------------------------------------- 缩略图加载失败回退 */
-  // error 事件不冒泡，必须在捕获阶段监听。
-  document.addEventListener('error', function (event) {
-    var el = event.target;
-    if (!el || el.tagName !== 'IMG') return;
-    var fallback = el.parentElement && el.parentElement.querySelector('.thumb-fallback');
-    if (fallback) fallback.hidden = false;
-    el.hidden = true;                  // 隐藏而非移除，保持图片占位不跳动
-  }, true);
-
   /* -------------------------------------------------------- 搜索框快捷键 */
   var searchInput = document.getElementById('q');
   document.addEventListener('keydown', function (event) {
@@ -44,10 +34,10 @@
 
   /* ---------------------------------------------------------------- 列表 */
 
-  var grid = document.getElementById('results');
-  if (!grid) return;                   // 无结果页无需后续逻辑
+  var list = document.getElementById('results');
+  if (!list) return;                   // 无结果页无需后续逻辑
 
-  var cards = Array.prototype.slice.call(grid.querySelectorAll('.card'));
+  var rows = Array.prototype.slice.call(list.querySelectorAll('.row'));
   var siteSel = document.getElementById('f-site');
   var sectionSel = document.getElementById('f-section');
   var categorySel = document.getElementById('f-category');
@@ -62,14 +52,14 @@
     return isFinite(value) ? value : 0;
   }
 
-  function matchesFilters(card) {
-    if (siteSel.value && card.getAttribute('data-site') !== siteSel.value) return false;
-    if (sectionSel.value && card.getAttribute('data-section') !== sectionSel.value) return false;
-    if (categorySel.value && card.getAttribute('data-category') !== categorySel.value) return false;
+  function matchesFilters(row) {
+    if (siteSel.value && row.getAttribute('data-site') !== siteSel.value) return false;
+    if (sectionSel.value && row.getAttribute('data-section') !== sectionSel.value) return false;
+    if (categorySel.value && row.getAttribute('data-category') !== categorySel.value) return false;
 
     if (activeFlags.length) {
       // 前后补空格后用整词匹配，避免 "hd" 误命中 "uhd"。
-      var flags = ' ' + (card.getAttribute('data-flags') || '') + ' ';
+      var flags = ' ' + (row.getAttribute('data-flags') || '') + ' ';
       for (var i = 0; i < activeFlags.length; i++) {
         if (flags.indexOf(' ' + activeFlags[i] + ' ') === -1) return false;
       }
@@ -103,10 +93,10 @@
 
   function apply() {
     var visible = [];
-    for (var i = 0; i < cards.length; i++) {
-      var ok = matchesFilters(cards[i]);
-      cards[i].hidden = !ok;
-      if (ok) visible.push(cards[i]);
+    for (var i = 0; i < rows.length; i++) {
+      var ok = matchesFilters(rows[i]);
+      rows[i].hidden = !ok;
+      if (ok) visible.push(rows[i]);
     }
 
     sortVisible(visible);
@@ -114,7 +104,7 @@
     // 用文档片段一次性重排，避免逐个 append 触发多次重排。
     var fragment = document.createDocumentFragment();
     for (var j = 0; j < visible.length; j++) fragment.appendChild(visible[j]);
-    grid.appendChild(fragment);
+    list.appendChild(fragment);
 
     if (countEl) countEl.textContent = String(visible.length);
     if (noMatchEl) noMatchEl.hidden = visible.length > 0;
@@ -169,16 +159,22 @@
     var tid = button.getAttribute('data-tid');
     if (!tid) return;
 
-    var card = button.closest('.card');
-    var statusEl = card ? card.querySelector('.status') : null;
+    var row = button.closest('.row');
+    var statusEl = row ? row.querySelector('.status') : null;
     var original = button.textContent;
 
     button.disabled = true;
     button.textContent = '提交中…';
     setStatus(statusEl, 'loading', '正在提交…');
 
-    fetch('/download?tid=' + encodeURIComponent(tid), {
-      headers: { 'Accept': 'application/json' },
+    // 必须用 POST：提交下载会改变上游状态，服务端也只接受 POST 并校验同源。
+    fetch('/download', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
+      },
+      body: 'tid=' + encodeURIComponent(tid),
       credentials: 'same-origin'
     })
       .then(function (response) { return response.json(); })
@@ -227,7 +223,7 @@
     toast(legacyCopy(text) ? '已复制磁力链接' : '复制失败，请手动选择');
   }
 
-  grid.addEventListener('click', function (event) {
+  list.addEventListener('click', function (event) {
     var button = event.target.closest ? event.target.closest('button[data-act]') : null;
     if (!button) return;
     var action = button.getAttribute('data-act');

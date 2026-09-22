@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -426,5 +431,140 @@ func TestDescribeStatus(t *testing.T) {
 	// 换行必须被压平，否则日志会被撑爆。
 	if got := describeStatus(500, []byte("a\nb\nc")); strings.Contains(got, "\n") {
 		t.Errorf("错误信息中的换行未被压平: %q", got)
+	}
+}
+
+// TestFastAPIValidationMessage 覆盖线上 422 的报错可读性。
+//
+// 上游（FastAPI）参数校验失败时返回的是结构化报告，直接回显对用户毫无意义：
+//
+//	{"detail":[{"type":"missing","loc":["query","save_path"],"msg":"Field required"}]}
+//
+// 必须翻译成"查询参数 → save_path：Field required"这类能直接照做的提示。
+func TestFastAPIValidationMessage(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     string
+		wantHas  []string
+		wantNone bool // true 表示应当解析失败并返回空串
+	}{
+		{
+			name:    "缺失 query 参数（线上原样）",
+			body:    `{"detail":[{"type":"missing","loc":["query","save_path"],"msg":"Field required","input":null}]}`,
+			wantHas: []string{"查询参数", "save_path", "Field required"},
+		},
+		{
+			name:    "缺失 body 字段（带数组下标）",
+			body:    `{"detail":[{"type":"missing","loc":["body",0,"magnet"],"msg":"Field required"}]}`,
+			wantHas: []string{"请求体", "[0]", "magnet"},
+		},
+		{
+			name:    "多个错误只列前三条并省略",
+			body:    `{"detail":[{"loc":["query","a"],"msg":"x"},{"loc":["query","b"],"msg":"y"},{"loc":["query","c"],"msg":"z"},{"loc":["query","d"],"msg":"w"}]}`,
+			wantHas: []string{"a", "b", "c", "…"},
+		},
+		{
+			name:     "非 422 结构不做翻译",
+			body:     `{"code":4001,"message":"关键词过短"}`,
+			wantNone: true,
+		},
+		{
+			name:     "HTML 错误页不做翻译",
+			body:     `<html><body>502 Bad Gateway</body></html>`,
+			wantNone: true,
+		},
+		{
+			name:     "空的 detail 数组不做翻译",
+			body:     `{"detail":[]}`,
+			wantNone: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := fastAPIValidationMessage([]byte(tc.body))
+			if tc.wantNone {
+				if got != "" {
+					t.Errorf("应返回空串，实际 %q", got)
+				}
+				return
+			}
+			if got == "" {
+				t.Fatal("不应返回空串")
+			}
+			for _, want := range tc.wantHas {
+				if !strings.Contains(got, want) {
+					t.Errorf("结果应包含 %q，实际 %q", want, got)
+				}
+			}
+		})
+	}
+}
+
+// TestDescribeStatusPrefersHumanReadable422 确认 422 走的是翻译后的文案，
+// 而不是把原始 JSON 原样甩出来。
+func TestDescribeStatusPrefersHumanReadable422(t *testing.T) {
+	raw := `{"detail":[{"type":"missing","loc":["query","save_path"],"msg":"Field required","input":null}]}`
+	got := describeStatus(http.StatusUnprocessableEntity, []byte(raw))
+
+	if !strings.Contains(got, "参数校验失败") {
+		t.Errorf("应保留状态码语义，实际 %q", got)
+	}
+	if !strings.Contains(got, "save_path") {
+		t.Errorf("应指明缺失的参数名，实际 %q", got)
+	}
+	if strings.Contains(got, `"detail"`) || strings.Contains(got, `"type"`) {
+		t.Errorf("不应回显原始 JSON 结构，实际 %q", got)
+	}
+	// 解析不出结构时必须退回原文，不能把信息丢掉。
+	fallback := describeStatus(http.StatusUnprocessableEntity, []byte(`{"oops":1}`))
+	if !strings.Contains(fallback, "oops") {
+		t.Errorf("无法翻译时应保留原文线索，实际 %q", fallback)
+	}
+}
+
+// TestSubmitDownloadAlwaysSendsAllQueryParams 是 422 的单元级回归：
+// 无论是否配置下载器与保存路径，两个参数都必须出现（可为空）。
+func TestSubmitDownloadAlwaysSendsAllQueryParams(t *testing.T) {
+	var gotURI string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"code":0,"data":{}}`)
+	}))
+	defer upstream.Close()
+
+	client := NewAvdbClient(Config{APIBaseURL: upstream.URL, APIKey: "k", Timeout: 5 * time.Second})
+
+	cases := []struct {
+		name                 string
+		downloader, savePath string
+	}{
+		{"两者都空（最常见）", "", ""},
+		{"只配下载器", "115", ""},
+		{"只配保存路径", "", "/media/movies"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, err := client.SubmitDownload(context.Background(), "3691410", tc.downloader, tc.savePath); err != nil {
+				t.Fatalf("提交下载失败: %v", err)
+			}
+			u, err := url.Parse(gotURI)
+			if err != nil {
+				t.Fatalf("上游 URI 无法解析: %v", err)
+			}
+			q := u.Query()
+			if q.Get("tid") != "3691410" {
+				t.Errorf("tid 不正确: %q", q.Get("tid"))
+			}
+			for _, key := range []string{"downloader", "save_path"} {
+				if _, ok := q[key]; !ok {
+					t.Fatalf("缺少参数 %s（上游会返回 422）: %s", key, gotURI)
+				}
+			}
+			if q.Get("downloader") != tc.downloader || q.Get("save_path") != tc.savePath {
+				t.Errorf("参数值未透传: %s", gotURI)
+			}
+		})
 	}
 }

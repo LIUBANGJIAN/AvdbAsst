@@ -8,8 +8,9 @@
 #   BASE_URL=http://127.0.0.1:8080 QUERY=ABC-123 ./scripts/smoke.sh
 #
 # 说明：
-#   - 只做只读探测（搜索、配置页、静态资源），**不会**触发任何下载，
-#     因此可以放心对生产实例执行。
+#   - 全部为只读探测（搜索、配置页、静态资源）。第 10 节虽然会打 /download，
+#     但用的都是"必然被拒"的请求（错误方法 / 缺参数 / 跨站），
+#     不会触达上游、不会真的提交下载，因此可以放心对生产实例执行。
 #   - 鉴权默认走 X-Auth-Token 请求头，避免在 URL 里拼口令；
 #     专门的第 9 节会另外验证 ?token= 、Cookie 与免鉴权路径。
 #   - 实例若尚未配置上游地址与 API Key，搜索类断言会被自动跳过。
@@ -101,11 +102,15 @@ printf '\n\033[1m[5] 搜索链路\033[0m\n'
 search_page="$(body_of "$BASE_URL/s?q=$QUERY")"
 check "GET /s?q=$QUERY" "$(status_of "$BASE_URL/s?q=$QUERY")" "200"
 
-if printf '%s' "$search_page" | grep -q 'class="alert"'; then
+if printf '%s' "$search_page" | grep -q 'class="alert'; then
   note "搜索返回了错误页（上游未配置或不可达），跳过结果断言"
   printf '        提示：打开 %s/settings 检查上游地址与 API Key\n' "$BASE_URL"
 else
   contains "结果页含结果容器"   "$search_page" 'id="results"'
+  contains "结果页为列表容器"   "$search_page" 'class="results"'
+  contains "结果项为列表行"     "$search_page" 'class="row"'
+  # 产品要求：只显示文字列表，不加载海报图
+  missing  "结果页不含任何图片" "$search_page" '<img'
   contains "结果页含筛选工具条" "$search_page" 'class="toolbar"'
 
   api="$(body_of "$BASE_URL/api/search?q=$QUERY")"
@@ -176,6 +181,27 @@ else
   note "未提供 TOKEN，跳过鉴权相关断言（设 TOKEN=... 可启用）"
   check "未设口令时 /s 应开放" "$(raw_status "$BASE_URL/s?q=x")" "200"
 fi
+
+# ---------------------------------------------------------------- 下载收口
+printf '\n\033[1m[10] 下载接口收口（只验证拒绝路径，不会真的提交下载）\033[0m\n'
+# 提交下载是唯一的写操作：必须 POST，且必须同源。
+# 下面三条断言全部落在"进入上游之前就被拒"，因此对生产实例执行也安全。
+# 注意要带访问口令：鉴权中间件在路由之前，不带口令只会拿到 401，测不到方法/来源校验。
+dl_get="$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
+    -H "X-Auth-Token: $TOKEN" "$BASE_URL/download?tid=1")"
+check "GET /download 应 405（挡住 <img src> 触发）" "$dl_get" "405"
+
+dl_no_tid="$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
+    -X POST -H "X-Auth-Token: $TOKEN" -H "Origin: $BASE_URL" \
+    -H "Content-Type: application/x-www-form-urlencoded" --data '' "$BASE_URL/download")"
+check "POST /download 缺 tid 应 400" "$dl_no_tid" "400"
+
+dl_csrf="$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
+    -X POST -H "X-Auth-Token: $TOKEN" -H "Origin: http://evil.example.com" \
+    -H "Referer: http://evil.example.com/attack.html" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data 'tid=1' "$BASE_URL/download")"
+check "跨站 POST /download 应 403" "$dl_csrf" "403"
 
 # ---------------------------------------------------------------- 汇总
 printf '\n\033[1m结果\033[0m：\033[32m%d 通过\033[0m' "$pass"

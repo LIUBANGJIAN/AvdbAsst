@@ -131,7 +131,12 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /search/{q}", a.handleSearch)
 
 	mux.HandleFunc("GET /api/search", a.handleAPISearch)
-	mux.HandleFunc("GET /download", a.handleDownload)
+
+	// 提交下载会改变上游状态、且动用到本站保管的上游令牌，因此做两道收口：
+	//  1. 只接受 POST —— 外部页面无法用 <img src="..."> 这类 GET 触发；
+	//  2. 叠加同源校验，进一步堵住跨站表单提交。
+	// 这两点缺一不可：仅靠来源校验挡不住把 referrerpolicy 设为 no-referrer 的 GET。
+	mux.HandleFunc("POST /download", a.handleDownload)
 
 	// 设置页面：GET 渲染表单，POST 保存（PRG 模式，避免刷新重复提交）。
 	// 用 POST 而不是 PUT/DELETE，是为了在浏览器禁用 JS 时依然能提交表单。
@@ -450,7 +455,18 @@ type upstreamResult struct {
 }
 
 func (a *App) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		a.log.Warn("拒绝跨站下载提交",
+			"origin", r.Header.Get("Origin"), "referer", r.Header.Get("Referer"))
+		writeJSON(w, http.StatusForbidden, downloadResponse{Success: false, Message: originDiagnosis(r)})
+		return
+	}
+
+	// tid 允许放在 query 或表单体里：前端用 fetch POST 提交，命令行用 curl -d 都顺手。
 	tid := strings.TrimSpace(r.URL.Query().Get("tid"))
+	if tid == "" {
+		tid = strings.TrimSpace(r.PostFormValue("tid"))
+	}
 	if tid == "" {
 		writeJSON(w, http.StatusBadRequest, downloadResponse{Success: false, Message: "缺少参数 tid"})
 		return

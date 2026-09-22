@@ -152,13 +152,17 @@ func (c *AvdbClient) Ping(ctx context.Context) error {
 
 // SubmitDownload 把某条资源交给上游的下载器。
 // 返回值：(上游原始响应体, 上游 HTTP 状态码, error)。
+//
+// 关于参数：上游把这个接口的 downloader 与 save_path 声明成了**必填** query 参数
+// （官方文档标注"选填"，但实测缺失即返回
+// 422 {"detail":[{"type":"missing","loc":["query","save_path"]...}]}）。
+// 两个参数的空值语义是"继承服务端全局设置"，因此这里**始终发送**：
+// 既满足上游的必填校验，又让"不填"成为一个合法且最不容易出错的选项。
 func (c *AvdbClient) SubmitDownload(ctx context.Context, tid, downloader, savePath string) ([]byte, int, error) {
-	q := url.Values{"tid": {tid}}
-	if downloader != "" {
-		q.Set("downloader", downloader)
-	}
-	if savePath != "" {
-		q.Set("save_path", savePath)
+	q := url.Values{
+		"tid":        {tid},
+		"downloader": {strings.TrimSpace(downloader)},
+		"save_path":  {strings.TrimSpace(savePath)},
 	}
 	return c.request(ctx, http.MethodGet, "/api/v1/articles/download/manul", q)
 }
@@ -270,10 +274,86 @@ func describeStatus(status int, body []byte) string {
 		return r
 	}, snippet)
 
+	// 422 换个说法：FastAPI 返回的是结构化校验报告，直接甩原文等于没说。
+	if status == http.StatusUnprocessableEntity {
+		if detail := fastAPIValidationMessage(body); detail != "" {
+			return fmt.Sprintf("%s：%s", hint, detail)
+		}
+	}
+
 	if snippet == "" {
 		return fmt.Sprintf("%s（HTTP %d）", hint, status)
 	}
 	return fmt.Sprintf("%s（HTTP %d）：%s", hint, status, snippet)
+}
+
+// fastAPIValidationMessage 把 FastAPI 的 422 校验报告翻译成一句人话。
+//
+// 上游参数校验失败时返回的是结构化 JSON，例如：
+//
+//	{"detail":[{"type":"missing","loc":["query","save_path"],"msg":"Field required"}]}
+//
+// 这种内容贴给用户毫无意义。这里翻译成"查询参数 → save_path：Field required"，
+// 让人一眼看出是少传了哪个参数。解析不出来就返回空串，由调用方走原文兜底。
+func fastAPIValidationMessage(body []byte) string {
+	const maxItems = 3 // 报错再多也只列前几条，避免糊满界面
+
+	var payload struct {
+		Detail []struct {
+			Loc []json.RawMessage `json:"loc"`
+			Msg string            `json:"msg"`
+		} `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || len(payload.Detail) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, maxItems)
+	for _, item := range payload.Detail {
+		if len(parts) >= maxItems {
+			parts = append(parts, "…")
+			break
+		}
+		where := describeLoc(item.Loc)
+		msg := strings.TrimSpace(item.Msg)
+		switch {
+		case where != "" && msg != "":
+			parts = append(parts, where+"："+msg)
+		case where != "":
+			parts = append(parts, where)
+		case msg != "":
+			parts = append(parts, msg)
+		}
+	}
+	return strings.Join(parts, "；")
+}
+
+// describeLoc 把 FastAPI 的 loc 数组翻成中文链路。
+// loc 可能形如 ["query","save_path"]，也可能是 ["body",0,"magnet"] 这种带下标的混合形式。
+func describeLoc(loc []json.RawMessage) string {
+	labels := map[string]string{
+		"query":  "查询参数",
+		"body":   "请求体",
+		"path":   "路径参数",
+		"header": "请求头",
+	}
+	parts := make([]string, 0, len(loc))
+	for _, raw := range loc {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			if label, ok := labels[s]; ok {
+				parts = append(parts, label)
+			} else {
+				parts = append(parts, s)
+			}
+			continue
+		}
+		var n int
+		if err := json.Unmarshal(raw, &n); err == nil {
+			parts = append(parts, fmt.Sprintf("[%d]", n))
+		}
+	}
+	return strings.Join(parts, " → ")
 }
 
 // isRetryableStatus 判断状态码是否属于值得重试的瞬态故障。

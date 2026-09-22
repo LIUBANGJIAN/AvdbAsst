@@ -73,6 +73,17 @@ func do(app *App, method, target string) *httptest.ResponseRecorder {
 	return rec
 }
 
+// doDownload 以 POST 提交下载——这是浏览器前端的实际形态，
+// 也是服务端唯一接受的形态（GET 一律 405，用来堵住 <img src> 触发的 CSRF）。
+func doDownload(app *App, tid string) *httptest.ResponseRecorder {
+	form := url.Values{"tid": {tid}}
+	req := httptest.NewRequest(http.MethodPost, "/download", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, req)
+	return rec
+}
+
 // excerpt 在断言失败时截取响应片段，便于定位问题而不是打印整页 HTML。
 func excerpt(body, marker string) string {
 	idx := strings.Index(body, marker)
@@ -87,6 +98,16 @@ func excerpt(body, marker string) string {
 		end = len(body)
 	}
 	return body[idx:end]
+}
+
+// mustParseQuery 从 "path?a=1&b=2" 里取出查询参数，失败直接终止测试。
+func mustParseQuery(t *testing.T, rawURI string) url.Values {
+	t.Helper()
+	u, err := url.Parse(rawURI)
+	if err != nil {
+		t.Fatalf("上游请求 URI 无法解析: %v", err)
+	}
+	return u.Query()
 }
 
 // ---------------------------------------------------------------- 搜索页
@@ -315,9 +336,9 @@ func TestSearchUpstreamErrorIsFriendly(t *testing.T) {
 	}
 	body := rec.Body.String()
 	if !strings.Contains(body, "鉴权失败") {
-		t.Errorf("未给出鉴权失败提示；片段: %s", excerpt(body, "class=\"alert\""))
+		t.Errorf("未给出鉴权失败提示；片段: %s", excerpt(body, "class=\"alert"))
 	}
-	if !strings.Contains(body, `class="alert"`) {
+	if !strings.Contains(body, `class="alert`) {
 		t.Error("缺少错误提示条")
 	}
 }
@@ -370,8 +391,12 @@ func TestSearchNoResult(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d, 期望 200", rec.Code)
 	}
-	if !strings.Contains(body, "没有找到相关结果") {
+	if !strings.Contains(body, "没有找到") {
 		t.Error("应展示空结果提示")
+	}
+	// 空态里必须回显关键词，否则用户看不出自己搜的是什么。
+	if !strings.Contains(body, "zzz") {
+		t.Error("空结果提示应包含原关键词")
 	}
 }
 
@@ -454,12 +479,67 @@ func TestAPISearchUpstreamFailure(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------- 结果列表
+
+// TestResultsRenderAsListWithoutPoster 锁定"列表形式展示、不加载海报"这一产品要求。
+// preview_image 在客户端仍做协议白名单（见下一个用例），但页面不应再渲染任何图片：
+// 海报既拖慢首屏，也不是列表这种高密度扫读场景需要的信息。
+func TestResultsRenderAsListWithoutPoster(t *testing.T) {
+	app := newTestApp(t, upstreamWith(upstreamSample))
+
+	body := do(app, http.MethodGet, "/s?q=abc").Body.String()
+
+	if !strings.Contains(body, `class="results"`) {
+		t.Error("结果区应为列表容器 .results")
+	}
+	if !strings.Contains(body, `class="row"`) {
+		t.Error("每条结果应为列表项 .row")
+	}
+	if strings.Contains(body, "<img") {
+		t.Errorf("结果列表不应包含任何 <img>；片段: %s", excerpt(body, "<img"))
+	}
+	if strings.Contains(body, "preview_image") {
+		t.Error("页面不应再引用 preview_image")
+	}
+	// 旧实现的缩略图/卡片相关标记必须彻底消失，否则说明只删了模板没清样式。
+	for _, gone := range []string{"thumb", "hero-grid", "card-"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("旧卡片结构残留标记 %q", gone)
+		}
+	}
+}
+
+// TestPosterFieldStillSanitized 说明"不显示"不等于"不过滤"：
+// 客户端依旧对 preview_image 做协议白名单，API 消费方拿到的仍是干净数据。
+func TestPosterFieldStillSanitized(t *testing.T) {
+	upstream := `{"code":0,"message":"操作成功","data":[
+		{"id":1,"number":"A-1","title":"T","preview_image":"javascript:alert(1)"},
+		{"id":2,"number":"A-2","title":"T","preview_image":"https://cdn.example.com/a.jpg"}
+	]}`
+	app := newTestApp(t, upstreamWith(upstream))
+
+	rec := do(app, http.MethodGet, "/api/search?q=abc")
+	var payload apiResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if len(payload.Torrents) != 2 {
+		t.Fatalf("期望 2 条结果，实际 %d", len(payload.Torrents))
+	}
+	if got := payload.Torrents[0].PreviewImage; got != "" {
+		t.Errorf("危险协议的 preview_image 应被清空，实际 %q", got)
+	}
+	if got := payload.Torrents[1].PreviewImage; !strings.HasPrefix(got, "https://") {
+		t.Errorf("合法的 https 图片地址应保留，实际 %q", got)
+	}
+}
+
 // ---------------------------------------------------------------- 下载
 
 func TestDownloadMissingTID(t *testing.T) {
 	app := newTestApp(t, upstreamWith(`{"code":0}`))
 
-	rec := do(app, http.MethodGet, "/download")
+	rec := doDownload(app, "")
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("状态码 = %d, 期望 400", rec.Code)
 	}
@@ -487,9 +567,8 @@ func TestDownloadInvalidTID(t *testing.T) {
 		"a#b",
 		"abcdefghij0123456789abcdefghij0123456789abcdefghij0123456789abcdefghij", // 超长
 	} {
-		// 必须编码后再拼，否则 httptest 会因为"URL 里有裸空格"直接 panic。
-		target := "/download?" + url.Values{"tid": {tid}}.Encode()
-		rec := do(app, http.MethodGet, target)
+		// 表单编码交给 url.Values，避免手工拼接引入的编码歧义。
+		rec := doDownload(app, tid)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("tid=%q 状态码 = %d, 期望 400", tid, rec.Code)
 		}
@@ -499,15 +578,35 @@ func TestDownloadInvalidTID(t *testing.T) {
 	}
 }
 
-func TestDownloadSuccess(t *testing.T) {
-	var gotPath, gotKey string
+// TestDownloadRejectsGET 锁定一个真实存在过的安全缺口：
+// 旧实现用 GET 触发上游下载提交，外部页面只要放一个
+// <img src="http://本站/download?tid=1"> 就能替用户提交下载。
+func TestDownloadRejectsGET(t *testing.T) {
+	var hit bool
 	app := newTestApp(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.RequestURI()
-		gotKey = r.Header.Get("X-API-Key")
-		_, _ = io.WriteString(w, `{"code":0,"message":"操作成功","data":{}}`)
+		hit = true
+		_, _ = io.WriteString(w, `{"code":0}`)
 	})
 
 	rec := do(app, http.MethodGet, "/download?tid=3691410")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET 状态码 = %d, 期望 405", rec.Code)
+	}
+	if hit {
+		t.Error("GET 不应触达上游")
+	}
+}
+
+func TestDownloadSuccess(t *testing.T) {
+	var gotPath, gotKey, gotMethod string
+	app := newTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		gotKey = r.Header.Get("X-API-Key")
+		gotMethod = r.Method
+		_, _ = io.WriteString(w, `{"code":0,"message":"操作成功","data":{}}`)
+	})
+
+	rec := doDownload(app, "3691410")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d, 期望 200", rec.Code)
 	}
@@ -523,11 +622,96 @@ func TestDownloadSuccess(t *testing.T) {
 		t.Errorf("TID = %q", resp.TID)
 	}
 	// 必须把配置里的下载器与保存路径透传上游。
-	if !strings.Contains(gotPath, "downloader=115") || !strings.Contains(gotPath, "save_path=") {
+	if gotMethod != http.MethodGet {
+		t.Errorf("后端请求上游应使用 GET，实际 %s", gotMethod)
+	}
+	if !strings.Contains(gotPath, "downloader=115") || !strings.Contains(gotPath, "save_path=%2Fmedia") {
 		t.Errorf("上游请求缺少参数: %s", gotPath)
 	}
 	if gotKey != "test-key" {
 		t.Errorf("上游请求未携带 API Key，实际 %q", gotKey)
+	}
+}
+
+// TestDownloadAlwaysSendsOptionalParams 是对线上 422 的回归测试。
+//
+// 上游把 downloader / save_path 声明成了必填 query 参数（官方文档却写"选填"），
+// 旧实现只在非空时才拼这两个参数，于是"没配下载器/保存路径"的用户
+// 必然拿到 422 {"detail":[{"type":"missing","loc":["query","save_path"]...}]}。
+// 现在无论是否配置都必须发送，空值由上游解释为"继承全局设置"。
+func TestDownloadAlwaysSendsOptionalParams(t *testing.T) {
+	var gotPath string
+	app := newTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		_, _ = io.WriteString(w, `{"code":0,"message":"操作成功"}`)
+	}, func(c *Config) {
+		// 故意清空：模拟"用户什么都没填"的最常见部署。
+		c.Downloader = ""
+		c.SavePath = ""
+	})
+
+	rec := doDownload(app, "3691410")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d, 期望 200", rec.Code)
+	}
+
+	query := mustParseQuery(t, gotPath)
+	for _, key := range []string{"tid", "downloader", "save_path"} {
+		if _, ok := query[key]; !ok {
+			t.Errorf("上游请求缺少 query 参数 %s（正是 422 的成因）: %s", key, gotPath)
+		}
+	}
+	if query.Get("downloader") != "" || query.Get("save_path") != "" {
+		t.Errorf("未配置时应传空值，实际 downloader=%q save_path=%q",
+			query.Get("downloader"), query.Get("save_path"))
+	}
+}
+
+// TestDownloadRejectsCrossSitePost 验证跨站表单提交被拦下。
+func TestDownloadRejectsCrossSitePost(t *testing.T) {
+	var hit bool
+	app := newTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		_, _ = io.WriteString(w, `{"code":0}`)
+	})
+
+	form := url.Values{"tid": {"3691410"}}
+	req := httptest.NewRequest(http.MethodPost, "/download", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "http://evil.example.com")
+	req.Header.Set("Referer", "http://evil.example.com/attack.html")
+	rec := httptest.NewRecorder()
+	app.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("状态码 = %d, 期望 403", rec.Code)
+	}
+	if hit {
+		t.Error("跨站请求不应触达上游")
+	}
+	// 403 必须给出可自助排查的现场信息，而不是一句话了事。
+	if !strings.Contains(rec.Body.String(), "Origin") {
+		t.Error("403 响应应回显实际收到的来源请求头")
+	}
+}
+
+func TestDownloadUpstreamUnreachable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	target := server.URL
+	server.Close() // 立刻关闭，制造"连不上"
+
+	app := NewApp(Config{APIBaseURL: target, Timeout: 2 * time.Second, Addr: ":0"}, discardLogger())
+	rec := doDownload(app, "1")
+
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("状态码 = %d, 期望 502", rec.Code)
+	}
+	var resp downloadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if resp.Success {
+		t.Error("连不上上游时 success 应为 false")
 	}
 }
 
@@ -567,26 +751,6 @@ func TestInterpretDownloadResult(t *testing.T) {
 				t.Errorf("Message = %q, 期望 %q", got.Message, tc.wantMessage)
 			}
 		})
-	}
-}
-
-func TestDownloadUpstreamUnreachable(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := server.URL
-	server.Close() // 立刻关闭，制造"连不上"
-
-	app := NewApp(Config{APIBaseURL: url, Timeout: 2 * time.Second, Addr: ":0"}, discardLogger())
-	rec := do(app, http.MethodGet, "/download?tid=1")
-
-	if rec.Code != http.StatusBadGateway {
-		t.Errorf("状态码 = %d, 期望 502", rec.Code)
-	}
-	var resp downloadResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("响应不是合法 JSON: %v", err)
-	}
-	if resp.Success {
-		t.Error("连不上上游时 success 应为 false")
 	}
 }
 
@@ -732,10 +896,15 @@ func TestStaticAssets(t *testing.T) {
 func TestMethodNotAllowed(t *testing.T) {
 	app := newTestApp(t, upstreamWith(upstreamSample))
 
-	for _, path := range []string{"/s", "/api/search", "/download", "/healthz"} {
+	// 只读端点拒绝 POST。
+	for _, path := range []string{"/s", "/api/search", "/healthz"} {
 		if rec := do(app, http.MethodPost, path); rec.Code != http.StatusMethodNotAllowed {
 			t.Errorf("POST %s 状态码 = %d, 期望 405", path, rec.Code)
 		}
+	}
+	// 下载是唯一的写操作，反向要求：只接受 POST。
+	if rec := do(app, http.MethodGet, "/download?tid=1"); rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /download 状态码 = %d, 期望 405", rec.Code)
 	}
 }
 
