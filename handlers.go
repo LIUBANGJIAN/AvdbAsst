@@ -289,11 +289,7 @@ type viewData struct {
 	// NeedSetup 表示尚未配置 API Key，页面首屏会给出引导。
 	NeedSetup bool
 
-	// SearchTemplate 是给浏览器/插件用的搜索模板（%s 占位）。
-	SearchTemplate string
-	// OpenSearchTemplate 是 OpenSearch 规范用的模板（{searchTerms} 占位）。
-	OpenSearchTemplate string
-	BaseURL            string
+	BaseURL string
 
 	Version string
 }
@@ -309,11 +305,9 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	base := requestBase(r)
 	data := viewData{
-		Keyword:            keyword,
-		BaseURL:            base,
-		Version:            a.version,
-		SearchTemplate:     a.searchTemplate(base, "%s", cfg),
-		OpenSearchTemplate: a.searchTemplate(base, "{searchTerms}", cfg),
+		Keyword: keyword,
+		BaseURL: base,
+		Version: a.version,
 		// 还没配好上游地址/令牌时，在首屏直接引导去设置页面，
 		// 而不是让用户对着一条看不懂的报错发呆。
 		NeedSetup: cfg.APIKey == "",

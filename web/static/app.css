@@ -198,22 +198,8 @@ code {
 .hero { padding: 36px 0 8px; }
 .hero h1 { font-size: 26px; margin: 0 0 10px; letter-spacing: -0.2px; }
 .hero > p { margin: 0 0 26px; color: var(--muted); max-width: 720px; }
-
-.hero-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
-  gap: 16px;
-}
-.hero-card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 18px 18px 20px;
-  box-shadow: var(--shadow);
-}
-.hero-card h2 { font-size: 15px; margin: 0 0 8px; }
-.hero-card p { margin: 0 0 12px; font-size: 13.5px; color: var(--muted); }
-.hero-card .btn { width: 100%; }
+/* 引导卡片已移除，标题下只剩一句说明时不再留出多余底部空白 */
+.hero > p:last-child { margin-bottom: 0; }
 
 .kv {
   display: grid;
@@ -224,9 +210,6 @@ code {
 }
 .kv dt { color: var(--muted); white-space: nowrap; }
 .kv dd { margin: 0; min-width: 0; }
-
-.plain { margin: 0; padding-left: 18px; font-size: 13.5px; color: var(--muted); }
-.plain li { margin-bottom: 6px; }
 
 /* ----------------------------------------------------------------- 工具条 */
 

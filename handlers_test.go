@@ -648,14 +648,10 @@ func TestAuthCookieAndHeader(t *testing.T) {
 func TestAuthTokenAppearsInSearchTemplate(t *testing.T) {
 	app := newTestApp(t, upstreamWith(upstreamSample), func(c *Config) { c.AccessToken = "s3cret" })
 
-	// 带口令访问首页时，页面里给出的搜索引擎模板必须自带口令，
-	// 否则用户照着配出来的浏览器搜索会一直 401。
-	rec := do(app, http.MethodGet, "/?token=s3cret")
-	if !strings.Contains(rec.Body.String(), "token=s3cret") {
-		t.Error("页面里的搜索模板应包含访问口令")
-	}
-
-	rec = do(app, http.MethodGet, "/opensearch.xml?token=s3cret")
+	// 首页已不再展示搜索模板（那段引导按需求移除），所以这里只校验
+	// OpenSearch 描述文档：浏览器自动发现它时必须带上口令，
+	// 否则用户照着加出来的站点搜索会一直 401。
+	rec := do(app, http.MethodGet, "/opensearch.xml?token=s3cret")
 	if !strings.Contains(rec.Body.String(), "token=s3cret") {
 		t.Error("OpenSearch 模板应包含访问口令")
 	}
