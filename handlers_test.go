@@ -633,16 +633,24 @@ func TestDownloadSuccess(t *testing.T) {
 	}
 }
 
-// TestDownloadNeverSendsEmptyDownloader 是线上两次报错的合并回归测试：
+// TestDownloadOmitsEmptyDownloader 是线上三次报错的合并回归测试。
+// 三次都出自同一个接口，但错在各不相同的地方，因此三条不变量要一起守：
 //
-//	第一阶段：旧实现只在非空时才拼参数 → 上游 422（缺 save_path）；
-//	第二阶段：改成"始终发送"，但 downloader 空着 → 上游回 `未找到下载器: ...`。
+//	第 1 次：只在非空时才拼参数 → 上游 422（缺 save_path）；
+//	第 2 次：改成"始终发送"、downloader 传空串 → 上游回 `未找到下载器`；
+//	第 3 次：仍然发空值，只是改成猜一个"115" → 上游回
+//	        `未找到下载器: Downloader.115`。
 //
-// 现在要守住的不变量有三条：
-//  1. tid / downloader / save_path 三个参数**始终发送**（满足上游的必填校验）；
-//  2. downloader **永不为空**——上游把空标识当作"查不到"，会直接拒绝；
-//  3. save_path 允许为空，留空表示交给上游决定。
-func TestDownloadNeverSendsEmptyDownloader(t *testing.T) {
+// 第 2、3 次的共同错误是**把"未设置"编码成了一个值**。上游的语义是：
+// downloader 未设置就**不要传这个参数**，它会自己去用全局默认下载器。
+// 传空串等于告诉它"去找一个 id 为空的下载器"，猜 "115" 等于问它
+// "有没有叫 115 的下载器"——两者都不是用户想表达的意思。
+//
+// 要守住的三条：
+//  1. tid 必传；
+//  2. save_path 必传，空值也传（上游确实接受空串，这条是实测出来的差异）；
+//  3. downloader 未设置时**参数不得出现**，而不是出现且为空。
+func TestDownloadOmitsEmptyDownloader(t *testing.T) {
 	var gotPath string
 	app := newTestApp(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.RequestURI()
@@ -659,16 +667,15 @@ func TestDownloadNeverSendsEmptyDownloader(t *testing.T) {
 	}
 
 	query := mustParseQuery(t, gotPath)
-	for _, key := range []string{"tid", "downloader", "save_path"} {
-		if _, ok := query[key]; !ok {
-			t.Errorf("上游请求缺少 query 参数 %s（正是 422 的成因）: %s", key, gotPath)
-		}
+	if _, ok := query["tid"]; !ok {
+		t.Errorf("上游请求缺少 tid: %s", gotPath)
 	}
-	if got := query.Get("downloader"); got != defaultDownloader {
-		t.Errorf("downloader 空值应补成内置默认值 %q，实际传了 %q", defaultDownloader, got)
+	if _, ok := query["save_path"]; !ok {
+		t.Errorf("上游请求缺少 save_path（正是第 1 次 422 的成因）: %s", gotPath)
 	}
-	if got := query.Get("save_path"); got != "" {
-		t.Errorf("save_path 留空时应传空值，实际传了 %q", got)
+	if _, ok := query["downloader"]; ok {
+		t.Errorf("未设置下载器时不应发送 downloader 参数（发送空串会让上游去找 id 为空的下载器，返回『未找到下载器』），实际发送了 %q",
+			query.Get("downloader"))
 	}
 }
 

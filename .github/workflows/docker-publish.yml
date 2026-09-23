@@ -95,6 +95,23 @@ jobs:
             # 每个提交一个 sha 标签，便于精确回滚
             type=sha,prefix=sha-,format=short
 
+      - name: 计算版本号
+        id: ver
+        # 注入到二进制里的版本串。刻意不直接用 github.ref_name：
+        # 推 main 时它的值恒为 "main"，页面右上角永远显示同一个词，区分不了构建。
+        # 加上短 sha 之后，"哪次提交的镜像"一眼可辨；打 tag 时则用 tag 本身。
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          short="$(printf '%s' "$SHA" | cut -c1-7)"
+          if [ "$REF_TYPE" = "tag" ]; then
+            echo "value=$REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=$REF_NAME@$short" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: 构建并推送
         uses: docker/build-push-action@v6
         with:
@@ -108,7 +125,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ steps.ver.outputs.value }}
 
       - name: 输出摘要
         run: |

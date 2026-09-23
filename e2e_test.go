@@ -26,8 +26,12 @@ import (
 // "非空才发送"的旧写法，这一组测试就会立刻失败。
 // ---------------------------------------------------------------------------
 
-// downloadRequiredParams 是下载接口要求的全部 query 参数。
-var downloadRequiredParams = []string{"tid", "downloader", "save_path"}
+// downloadRequiredParams 是下载接口**必填**的 query 参数。
+//
+// downloader 不在其列：官方文档标它是"选填"，实测也确实如此——缺了它不会 422。
+// 它的坑在别处：传空串会被上游当成一个名叫"空"的下载器，回 `未找到下载器`。
+// 所以正确姿势是"有值才带"，见 avdb.go 的 SubmitDownload。
+var downloadRequiredParams = []string{"tid", "save_path"}
 
 type recordedRequest struct {
 	Method string
@@ -85,7 +89,7 @@ func (s *strictUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 
 	case "/api/v1/articles/download/manul":
-		// 严格校验：一个参数都不能少（这正是线上 422 的来源）。
+		// 严格校验：必填参数一个都不能少（这正是线上 422 的来源）。
 		var missing []map[string]any
 		for _, param := range downloadRequiredParams {
 			if _, ok := r.URL.Query()[param]; !ok {
@@ -98,6 +102,17 @@ func (s *strictUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if len(missing) > 0 {
 			upstreamWriteJSON(w, http.StatusUnprocessableEntity, map[string]any{"detail": missing})
 			return
+		}
+		// 复刻真实上游对"空标识"的处理：传了就要能查到，传空串一律视为
+		// "名为空的下载器"而拒绝。这条断言是本次修复的核心——
+		// 若客户端把"留空"实现成"发空串"，这里必须炸。
+		if v, present := r.URL.Query()["downloader"]; present {
+			if strings.TrimSpace(v[0]) == "" {
+				upstreamWriteJSON(w, http.StatusOK, map[string]any{
+					"code": 1, "message": "未找到下载器: ",
+				})
+				return
+			}
 		}
 		upstreamWriteJSON(w, http.StatusOK, map[string]any{
 			"code": 0, "message": "已提交到下载器", "data": map[string]any{},
@@ -168,7 +183,7 @@ func TestStrictUpstreamReproduces422(t *testing.T) {
 
 // TestEndToEndDownloadAgainstStrictUpstream 是本次修复的端到端验收：
 // 用"什么都没填"的配置（最常见的部署形态）走完整链路，
-// 必须成功，且上游要收到全部三个参数。
+// 必须成功，且**不能**把 downloader 以空值形式发给上游。
 func TestEndToEndDownloadAgainstStrictUpstream(t *testing.T) {
 	server, up := newStrictUpstream(t)
 
@@ -201,7 +216,7 @@ func TestEndToEndDownloadAgainstStrictUpstream(t *testing.T) {
 		t.Fatalf("提交下载应成功，实际 message=%q", resp.Message)
 	}
 
-	// 上游侧必须收到齐全的参数——这是 422 不再复发的直接证据。
+	// 上游侧必须收到必填参数——这是 422 不再复发的直接证据。
 	got := up.last(t)
 	if got.Path != "/api/v1/articles/download/manul" {
 		t.Errorf("上游路径 = %q", got.Path)
@@ -217,17 +232,21 @@ func TestEndToEndDownloadAgainstStrictUpstream(t *testing.T) {
 	if got.Query.Get("tid") != "3691410" {
 		t.Errorf("tid = %q", got.Query.Get("tid"))
 	}
-	// downloader 必须**非空**：上游对空标识的回应是 `未找到下载器: ...`，
-	// 与官方文档"选填"的标注相反（实测如此）。空配置会在 App 构造期补成内置默认值。
-	if got.Query.Get("downloader") == "" {
-		t.Error("downloader 不能为空，否则上游会返回『未找到下载器』")
+
+	// 本次修复的核心断言：没配下载器时，这个参数必须**整个不存在**。
+	//
+	// 不能用 Get() == "" 来判断——那对"没有该键"和"键存在但值为空"是一样的，
+	// 而这两种情形在上游眼里天差地别：前者继承全局下载器，后者会去查一个
+	// 名叫"空"的下载器然后报 `未找到下载器`。假上游已经复刻了这个行为，
+	// 所以只要客户端退化成发空串，这里就会失败。
+	if values, present := got.Query["downloader"]; present {
+		t.Errorf("未配置下载器时不应发送 downloader 参数，实际发了 %q（上游会回『未找到下载器』）", values)
 	}
-	if got.Query.Get("downloader") != defaultDownloader {
-		t.Errorf("downloader = %q，期望默认值 %q", got.Query.Get("downloader"), defaultDownloader)
-	}
-	// save_path 不同：留空是合法的，表示交给上游决定。
-	if got.Query.Get("save_path") != "" {
-		t.Errorf("未配置保存路径时应传空值，实际 %q", got.Query.Get("save_path"))
+	// save_path 不同：留空是合法的，但必须**发送**（上游判它必填，空值也发）。
+	if values, present := got.Query["save_path"]; !present {
+		t.Error("save_path 必须发送（上游判为必填），即使值为空")
+	} else if values[0] != "" {
+		t.Errorf("未配置保存路径时应传空值，实际 %q", values[0])
 	}
 	if got.APIKey != "e2e-key" {
 		t.Errorf("上游未收到 X-API-Key，实际 %q", got.APIKey)

@@ -24,6 +24,7 @@
       <a href="/">搜索</a>
       <a class="is-active" href="/settings">设置</a>
     </nav>
+    <span class="ver-badge" title="当前运行的版本">{{.Version}}</span>
   </div>
 </header>
 
@@ -85,58 +86,31 @@
 
     <section class="panel">
       <h2>下载</h2>
-      <p class="panel-hint">「下载器标识」要填上游认识的值，不确定就先校验，或登录上游读出清单。</p>
+      <p class="panel-hint">
+        两项都留空 = 直接用上游配好的默认下载目标，不必在这里填。
+        上游没有默认配置时点「读取上游默认下载器」把真实值取回来。
+      </p>
 
       <div class="field-row">
         <label for="default_downloader">下载器标识</label>
         <input type="text" id="default_downloader" name="default_downloader" value="{{.Downloader}}"
-               list="downloader-options" spellcheck="false">
+               placeholder="留空 = 用上游默认下载器" spellcheck="false">
       </div>
-      <datalist id="downloader-options">
-        {{range .DownloaderOptions}}<option value="{{.ID}}">{{if .Label}}{{.Label}}{{end}}</option>{{end}}
-      </datalist>
 
       <div class="field-row">
         <label for="default_save_path">保存路径</label>
         <input type="text" id="default_save_path" name="default_save_path" value="{{.SavePath}}"
-               list="save-path-options" placeholder="留空 = 交给上游决定" spellcheck="false">
+               list="save-path-options" placeholder="留空 = 用上游默认目录" spellcheck="false">
       </div>
       <datalist id="save-path-options">
         {{range .SavePathOptions}}<option value="{{.}}"></option>{{end}}
       </datalist>
 
       <div class="field-actions">
+        <button type="button" class="btn btn-ghost" id="btn-default-rule">读取上游默认下载器</button>
         <button type="button" class="btn btn-ghost" id="btn-check-downloader">校验下载器并列出目录</button>
-        <span class="test-result" id="downloader-result" role="status" aria-live="polite"></span>
       </div>
-    </section>
-
-    <section class="panel">
-      <h2>从上游读取配置</h2>
-      <p class="panel-hint">下载器清单只能靠登录凭据读取，访问令牌无权调用。密码与 JWT 只在本次请求内使用，不落盘。</p>
-
-      <div class="field-row">
-        <label for="upstream_username">用户名</label>
-        <input type="text" id="upstream_username" autocomplete="username" spellcheck="false">
-      </div>
-
-      <div class="field-row">
-        <label for="upstream_password">密码</label>
-        <input type="password" id="upstream_password" autocomplete="current-password">
-      </div>
-
-      <div class="field-row is-hidden" id="otp-row">
-        <label for="upstream_otp">动态验证码</label>
-        <input type="text" id="upstream_otp" inputmode="numeric" autocomplete="one-time-code"
-               placeholder="验证器上的 6 位数字" spellcheck="false">
-      </div>
-
-      <div class="field-actions">
-        <button type="button" class="btn btn-ghost" id="btn-login">登录并获取下载器清单</button>
-        <span class="test-result" id="login-result" role="status" aria-live="polite"></span>
-      </div>
-
-      <div class="probe-trace is-hidden" id="login-trace"></div>
+      <p class="test-result" id="downloader-result" role="status" aria-live="polite"></p>
     </section>
 
     <section class="panel">
@@ -193,10 +167,6 @@
   </section>
 
 </main>
-
-<footer class="foot">
-  <span>Avdb 搜索 · {{.Version}}</span>
-</footer>
 
 <script src="/static/settings.js" defer></script>
 </body>

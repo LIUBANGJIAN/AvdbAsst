@@ -73,17 +73,12 @@ func (e *UpstreamError) Error() string { return e.Msg }
 
 // AvdbClient 是上游 Avdb API 的最小客户端。
 //
-// 凭据有两种，用途不同，不能混用：
-//   - key（X-API-Key）：访问令牌，绝大多数业务路由可用，本站长期持有；
-//   - jwt（Authorization: Bearer）：登录换来的短期票据，只有它能读
-//     /api/v1/config/{key} 这类"设置类"路由。
-//
-// 上游对只认 JWT 的路由不接受 X-API-Key，因此两者**互斥**发送，
-// 见 do() 里的鉴权优先级。
+// 只用访问令牌（X-API-Key）。上游的少数接口（如 /api/v1/config/{key}）
+// 只认登录 JWT，本站刻意不碰那些接口——需要的默认下载器可以从
+// /api/v1/javdb/subscriptions/default-rule 拿到，那个接口接受访问令牌。
 type AvdbClient struct {
 	base string
 	key  string
-	jwt  string
 	http *http.Client
 }
 
@@ -162,20 +157,25 @@ func (c *AvdbClient) Ping(ctx context.Context) error {
 // SubmitDownload 把某条资源交给上游的下载器。
 // 返回值：(上游原始响应体, 上游 HTTP 状态码, error)。
 //
-// 关于参数：上游把这个接口的 downloader 与 save_path 声明成了**必填** query 参数
-// （官方文档标注"选填"，但实测缺失即返回
-// 422 {"detail":[{"type":"missing","loc":["query","save_path"]...}]}）。
-// 因此这里**始终发送**这两个参数。
+// 两个参数的语义**不一样**，别把它们当成一对：
 //
-// 但"必填"不等于"空值合法"：实测 downloader 传空串会被上游拒绝，
-// 返回 `未找到下载器: ...`。文档里"为空时继承全局"的说明只适用于
-// **订阅规则**表单（JavdbSubscriptionRuleForm），不适用于本接口。
-// 所以 downloader 必须有真实值；空值的兜底与提示见 handlers.go 的 handleDownload。
+//   - tid：必填。
+//   - save_path：上游判为必填。实测缺失即返回
+//     422 {"detail":[{"type":"missing","loc":["query","save_path"]...}]}，
+//     所以这里**始终发送**，空值也发（空串是被接受的）。
+//   - downloader：选填。"留空即继承上游的全局下载器"这个语义是对的，
+//     但**正确的实现是省略这个 query 参数，而不是发送空串**——上游会把空串
+//     当成一个名叫"空"的下载器去查，然后回一句 `未找到下载器`。
+//     本项目先后踩过"发空串"和"猜一个 115"两种错法，都不是它的本意。
+//
+// 因此这里按"有值才带"处理：downloader 为空时它在查询串里根本不出现。
 func (c *AvdbClient) SubmitDownload(ctx context.Context, tid, downloader, savePath string) ([]byte, int, error) {
 	q := url.Values{
-		"tid":        {tid},
-		"downloader": {strings.TrimSpace(downloader)},
-		"save_path":  {strings.TrimSpace(savePath)},
+		"tid":       {tid},
+		"save_path": {strings.TrimSpace(savePath)},
+	}
+	if id := strings.TrimSpace(downloader); id != "" {
+		q.Set("downloader", id)
 	}
 	return c.request(ctx, http.MethodGet, "/api/v1/articles/download/manul", q)
 }
@@ -210,40 +210,22 @@ func (c *AvdbClient) getWithRetry(ctx context.Context, path string, q url.Values
 	return nil, lastErr
 }
 
-// request 执行一次 GET 请求，返回响应体与状态码。
-func (c *AvdbClient) request(ctx context.Context, method, path string, q url.Values) ([]byte, int, error) {
-	return c.do(ctx, method, path, q, nil, "")
-}
-
-// do 是全部上游请求的统一出口。
+// request 执行一次上游 GET 请求，返回响应体与状态码。
 //
-// form 非 nil 时以 application/x-www-form-urlencoded 发送请求体；
-// jwtOverride 用于一次性指定 JWT（设置页登录流程里，票据还没写进客户端）。
-func (c *AvdbClient) do(ctx context.Context, method, path string, q, form url.Values, jwtOverride string) ([]byte, int, error) {
+// 全部上游调用都只走这一条路：本站只读上游的业务与配置接口，不发请求体。
+func (c *AvdbClient) request(ctx context.Context, method, path string, q url.Values) ([]byte, int, error) {
 	endpoint := c.base + path
 	if len(q) > 0 {
 		endpoint += "?" + q.Encode()
 	}
 
-	var bodyReader io.Reader
-	if form != nil {
-		bodyReader = strings.NewReader(form.Encode())
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, bodyReader)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("构造上游请求失败：%w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", "AvdbAsst/"+version)
-	if form != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	}
-	// 鉴权优先级：一次性 JWT 覆盖 > 客户端自带 JWT > API Key。
-	// 必须二选一：给只认 JWT 的路由同时带上 X-API-Key 反而容易被判为无效凭据。
-	if token := firstNonEmpty(jwtOverride, c.jwt); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	} else if c.key != "" {
+	if c.key != "" {
 		req.Header.Set("X-API-Key", c.key)
 	}
 

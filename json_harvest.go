@@ -2,14 +2,14 @@ package main
 
 // 上游 JSON 的防御式解析。
 //
-// 背景：上游没有公开"下载器清单"和"目录清单"的响应结构承诺，同一个语义
-// 在不同版本里可能是 "115"、{"id":"115"}、{"downloader_id":"115","name":"115网盘"}
-// 甚至嵌在 {"data":{"items":[...]}} 里。硬编码一种结构必然在某个版本上失效。
+// 背景：上游没有公开"目录清单"的响应结构承诺，同一个语义在不同版本里可能是
+// ["/media/tv"]、[{"path":"/media/tv","name":"剧集"}]，甚至嵌在
+// {"data":{"items":[...]}} 里。硬编码一种结构必然在某个版本上失效。
 //
 // 安全红线（比"解析得全"更重要）：
-//   上游配置里可能含 115 的 Cookie、网盘账号、Emby 密钥等敏感值。
-//   因此这里**只按白名单字段名取值**，绝不把整个配置对象当成字符串集合收上来，
-//   也绝不把原始配置回传给浏览器。宁可少解析，也不能把凭据泄露到前端。
+//   上游响应里可能含 115 的 Cookie、网盘账号、Emby 密钥等敏感值。
+//   因此这里**只按白名单字段名取值**，绝不把整个对象当成字符串集合收上来，
+//   也绝不把原始响应回传给浏览器。宁可少解析，也不能把凭据泄露到前端。
 
 import (
 	"encoding/json"
@@ -18,90 +18,6 @@ import (
 
 // maxHarvested 是单次解析收集条目的上限，避免异常上游把页面撑爆。
 const maxHarvested = 50
-
-// downloaderIDKeys / downloaderLabelKeys 是"下载器标识"与"显示名"的候选字段。
-var (
-	downloaderIDKeys    = []string{"id", "downloader_id", "downloader", "key", "type", "driver", "name"}
-	downloaderLabelKeys = []string{"name", "label", "title", "remark", "type"}
-)
-
-// harvestDownloaderOptions 从一段任意 JSON 里收集下载器候选项。
-//
-// 只把**数组里的元素**当作条目：配置里的清单天然是数组，而散落在普通字段里的
-// 单个 "id"/"name" 多半属于无关设置，收上来只会制造噪音。
-func harvestDownloaderOptions(raw json.RawMessage) []DownloaderOption {
-	var node any
-	if err := json.Unmarshal(raw, &node); err != nil {
-		return nil
-	}
-
-	var out []DownloaderOption
-	seen := make(map[string]struct{})
-
-	add := func(id, label string) {
-		id = strings.TrimSpace(id)
-		if id == "" || len(out) >= maxHarvested {
-			return
-		}
-		if _, dup := seen[id]; dup {
-			return
-		}
-		seen[id] = struct{}{}
-		label = strings.TrimSpace(label)
-		if label == id {
-			label = "" // 显示名与标识相同就省掉，避免页面上出现"115（115）"
-		}
-		out = append(out, DownloaderOption{ID: id, Label: label})
-	}
-
-	var walk func(node any, depth int)
-	walk = func(node any, depth int) {
-		if depth > 4 || len(out) >= maxHarvested {
-			return
-		}
-		switch v := node.(type) {
-		case []any:
-			for _, item := range v {
-				switch elem := item.(type) {
-				case string:
-					add(elem, "")
-				case map[string]any:
-					if id, label := downloaderFields(elem); id != "" {
-						add(id, label)
-					} else {
-						walk(elem, depth+1)
-					}
-				default:
-					walk(elem, depth+1)
-				}
-			}
-		case map[string]any:
-			for _, child := range v {
-				walk(child, depth+1)
-			}
-		}
-	}
-	walk(node, 0)
-	return out
-}
-
-// downloaderFields 从一个对象里按白名单取出下载器标识与显示名。
-// 取不到标识就返回空串，调用方据此跳过该对象。
-func downloaderFields(m map[string]any) (id, label string) {
-	for _, key := range downloaderIDKeys {
-		if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
-			id = strings.TrimSpace(s)
-			break
-		}
-	}
-	for _, key := range downloaderLabelKeys {
-		if s, ok := m[key].(string); ok && strings.TrimSpace(s) != "" {
-			label = strings.TrimSpace(s)
-			break
-		}
-	}
-	return id, label
-}
 
 // directoryWrapperKeys 是目录清单可能被包在哪些字段名下。
 // 只认这些名字，不做"取遍所有字符串"的兜底——那会把 Cookie 之类的凭据一起收上来。

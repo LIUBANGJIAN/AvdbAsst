@@ -165,6 +165,21 @@ code {
   font-weight: 500;
 }
 
+/* 版本徽标：放在最右侧，用等宽字体便于逐字符比对 */
+.ver-badge {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  white-space: nowrap;
+  user-select: all;
+}
+
 /* ------------------------------------------------------------------ 搜索 */
 .search {
   display: flex;
@@ -225,15 +240,6 @@ code {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-}
-
-.foot {
-  max-width: var(--page-max);
-  margin: 0 auto;
-  width: 100%;
-  padding: var(--sp-5) var(--sp-5) var(--sp-6);
-  color: var(--text-dim);
-  font-size: 13px;
 }
 
 /* ------------------------------------------------------------------ 按钮 */
@@ -399,12 +405,24 @@ code {
   gap: 10px;
 }
 
+/* 结果行布局。
+ *
+ * 状态消息**刻意不放在操作列里**，而是独占第三行的整幅宽度。
+ * 原因是上游的报错原文可以很长（"未找到下载器……请到设置页……上游原文：……"），
+ * 塞进 auto 宽度的操作列会把该列撑得很宽，反过来把 minmax(0,1fr) 的主列挤到
+ * 只剩一两个字符宽——整行的站点名、板块、做种数会变成竖排的单字。
+ * 让消息独占一行，主列宽度就与消息长度无关了。 */
 .row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 100px auto;
-  grid-template-areas: "main size actions";
+  grid-template-areas:
+    "main size actions"
+    "status status status";
   align-items: center;
-  gap: var(--sp-5);
+  /* 行间距刻意用 0：grid 的 row-gap 在"状态行为空"时依然会留出空隙，
+   * 那样每一行都会平白多出十几像素的底部空白。
+   * 间距改由 .status 自己的 margin-top 提供，它一 hide 就自然归零。 */
+  gap: 0 var(--sp-5);
   padding: 14px 18px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -480,8 +498,15 @@ code {
   gap: var(--sp-2);
 }
 
-/* 行内状态：为空时不占位，出现时也不撑破布局 */
-.status { font-size: 12px; line-height: 1.4; min-width: 0; }
+/* 行内状态：独占整幅宽度，为空时不占位 */
+.status {
+  grid-area: status;
+  margin: var(--sp-3) 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .status:empty { display: none; }
 .status.is-ok      { color: var(--ok); }
 .status.is-err     { color: var(--danger); }
@@ -606,21 +631,6 @@ code {
 .kv dd { margin: 0; font-size: 13.5px; word-break: break-all; }
 .kv-wide { grid-template-columns: 110px 1fr; }
 
-/* 探测轨迹：等宽、可滚动，避免长文本撑破面板 */
-.probe-trace {
-  margin: var(--sp-3) 0 0;
-  padding: var(--sp-3) var(--sp-4);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  font-size: 12.5px;
-  color: var(--text-muted);
-  max-height: 180px;
-  overflow: auto;
-}
-.probe-trace ul { margin: 0; padding-left: 18px; }
-.probe-trace li { line-height: 1.7; }
-
 /* 二次验证码输入区：默认隐藏，由脚本在需要时展开 */
 .is-hidden { display: none !important; }
 
@@ -651,10 +661,14 @@ code {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
       "main size"
-      "actions actions";
-    row-gap: var(--sp-3);
+      "actions actions"
+      "status status";
   }
-  .row-actions { justify-content: flex-start; }
+  .row-actions {
+    justify-content: flex-start;
+    /* 窄屏上操作列独占一行，这时才需要它自己带间距（宽屏时它在第一行居中）。 */
+    margin-top: var(--sp-3);
+  }
 }
 
 @media (max-width: 640px) {
@@ -694,7 +708,7 @@ code {
 }
 
 @media print {
-  .topbar, .toolbar, .row-actions, .form-actions, .toast, .foot { display: none !important; }
+  .topbar, .toolbar, .row-actions, .form-actions, .toast { display: none !important; }
   body { background: #fff; }
   .row, .panel { box-shadow: none; border-color: #ccc; break-inside: avoid; }
 }

@@ -31,6 +31,7 @@
       <a class="is-active" href="/">搜索</a>
       <a href="/settings">设置</a>
     </nav>
+    <span class="ver-badge" title="当前运行的版本">{{.Version}}</span>
   </div>
 </header>
 
@@ -171,8 +172,9 @@
           <div class="row-actions">
             <button type="button" class="btn btn-primary" data-act="download" data-tid="{{$t.ID}}">下载</button>
             {{if $t.DownloadURL}}<button type="button" class="btn btn-ghost" data-act="copy" data-magnet="{{$t.DownloadURL}}">复制磁链</button>{{end}}
-            <span class="status" data-status-for="{{$t.ID}}" role="status" aria-live="polite"></span>
           </div>
+
+          <p class="status" data-status-for="{{$t.ID}}" role="status" aria-live="polite"></p>
         </li>
       {{end}}
     </ul>
@@ -184,10 +186,6 @@
   {{end}}
 
 </main>
-
-<footer class="foot">
-  <span>Avdb 搜索 · {{.Version}}</span>
-</footer>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
