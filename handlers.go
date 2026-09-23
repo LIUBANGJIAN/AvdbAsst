@@ -405,11 +405,30 @@ type viewData struct {
 	Keyword  string
 	Torrents []Torrent
 
-	Error      string
-	Truncated  bool
-	Sites      []string
-	Sections   []string
-	Categories []string
+	Error     string
+	Truncated bool
+
+	// ---- 筛选 ----
+	//
+	// 条件全部来自 URL、在**全量结果**上生效，所以翻页链接自然也带着它们
+	// （见 pagerURL）。Options 里已经算好 Selected，模板不需要写比较表达式。
+	SiteOptions     []selectOption
+	SectionOptions  []selectOption
+	CategoryOptions []selectOption
+	SortOptions     []selectOption
+	FilterText      string
+	Chips           []chipView
+	// FilterParams 是跳页表单要带的 hidden 字段（关键词 + 筛选，不含页码）。
+	FilterParams []formParam
+	// Filtered 表示当前施加了筛选（排序不算，它不改变结果集大小）。
+	Filtered bool
+	// ResetURL 指向"清掉筛选、保留关键词"的地址。
+	ResetURL string
+	// ShowResults 表示上游返回了结果——即便被筛剩 0 条，工具条也要留着，
+	// 否则用户没法把条件改回来，只能手动编辑 URL。
+	ShowResults bool
+	// TotalAll 是筛选**前**的条数，配合 Total 说明"筛掉了多少"。
+	TotalAll int
 
 	// NeedSetup 表示尚未配置 API Key，页面首屏会给出引导。
 	NeedSetup bool
@@ -483,24 +502,16 @@ func slicePage(items []Torrent, page, size int) pageWindow {
 	}
 }
 
-// pagerURL 生成分页链接。只带 q 与 page 两个参数：
-// 每页条数是已持久化的偏好，不该被翻页链接反复重发。
-func pagerURL(keyword string, page int) string {
-	q := url.Values{}
-	if keyword != "" {
-		q.Set("q", keyword)
-	}
-	if page > 1 {
-		q.Set("page", strconv.Itoa(page))
-	}
-	if len(q) == 0 {
-		return "/s"
-	}
-	return "/s?" + q.Encode()
+// pagerURL 生成分页链接：关键词 + **当前全部筛选条件** + 页码。
+//
+// 筛选条件必须跟着翻页走，这是本轮修掉的那个"筛完一翻页就没了"的病根；
+// 每页条数则相反，它是已持久化的偏好，不该被翻页链接反复重发。
+func pagerURL(keyword string, f searchFilter, page int) string {
+	return f.pageURL(keyword, page)
 }
 
 // pageLinks 生成分页条上的页码窗口：当前页附近最多 7 个，两端始终可见。
-func pageLinks(keyword string, current, totalPages int) []pageLink {
+func pageLinks(keyword string, f searchFilter, current, totalPages int) []pageLink {
 	const window = 7
 
 	first, last := 1, totalPages
@@ -521,7 +532,7 @@ func pageLinks(keyword string, current, totalPages int) []pageLink {
 
 	out := make([]pageLink, 0, last-first+1)
 	for n := first; n <= last; n++ {
-		out = append(out, pageLink{Number: n, URL: pagerURL(keyword, n), Current: n == current})
+		out = append(out, pageLink{Number: n, URL: pagerURL(keyword, f, n), Current: n == current})
 	}
 	return out
 }
@@ -592,6 +603,7 @@ func pageSizeOptions(current int) []pageSizeOption {
 // 或插件只做"打开 URL"这一动作，页面依然是完整的。
 func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 	keyword := keywordFrom(r)
+	flt := parseSearchFilter(r)
 	cfg, client := a.snapshot()
 	cfg = a.applyPageSizeQuery(r, cfg)
 
@@ -622,9 +634,29 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 				items = items[:cfg.MaxResults]
 				data.Truncated = true
 			}
-			data.Sites, data.Sections, data.Categories = collectFacets(items)
+			data.TotalAll = len(items)
+			data.ShowResults = len(items) > 0
 
-			win := slicePage(items, pageFromQuery(r), cfg.PageSize)
+			// 筛选项基于**筛选前**的全量结果：
+			// 否则选了「无码」之后，站点下拉框里会只剩含无码资源的那几个站点，
+			// 用户想换成另一个站点都点不到，等于把自己锁死在当前条件里。
+			data.SiteOptions = facetOptions(facetList(items, func(t Torrent) string { return t.Site }), flt.Site)
+			data.SectionOptions = facetOptions(facetList(items, func(t Torrent) string { return t.Section }), flt.Section)
+			data.CategoryOptions = facetOptions(facetList(items, func(t Torrent) string { return t.Category }), flt.Category)
+
+			// 先在全量上筛选、排序，再切页——顺序反了的话，排序只会作用在
+			// 当前页这 100 条上，翻页就是另一套顺序。
+			filtered := flt.apply(items)
+			sortTorrents(filtered, flt.Sort)
+
+			data.FilterText = flt.Text
+			data.SortOptions = sortOptions(flt.Sort)
+			data.Chips = flt.chips(keyword)
+			data.FilterParams = flt.hiddenParams(keyword)
+			data.Filtered = flt.active()
+			data.ResetURL = flt.resetURL(keyword)
+
+			win := slicePage(filtered, pageFromQuery(r), cfg.PageSize)
 			data.Torrents = win.Items
 			data.Page = win.Page
 			data.TotalPages = win.TotalPages
@@ -632,15 +664,15 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 			data.StartedAt = win.StartedAt
 			data.Paged = win.TotalPages > 1
 			if data.Paged {
-				data.FirstURL = pagerURL(keyword, 1)
-				data.LastURL = pagerURL(keyword, win.TotalPages)
+				data.FirstURL = pagerURL(keyword, flt, 1)
+				data.LastURL = pagerURL(keyword, flt, win.TotalPages)
 				if win.Page > 1 {
-					data.PrevURL = pagerURL(keyword, win.Page-1)
+					data.PrevURL = pagerURL(keyword, flt, win.Page-1)
 				}
 				if win.Page < win.TotalPages {
-					data.NextURL = pagerURL(keyword, win.Page+1)
+					data.NextURL = pagerURL(keyword, flt, win.Page+1)
 				}
-				data.PageLinks = pageLinks(keyword, win.Page, win.TotalPages)
+				data.PageLinks = pageLinks(keyword, flt, win.Page, win.TotalPages)
 			}
 		}
 	}
@@ -716,7 +748,13 @@ type apiResponse struct {
 	Sections   []string  `json:"sections"`
 	Categories []string  `json:"categories"`
 	Truncated  bool      `json:"truncated"`
-	Error      string    `json:"error,omitempty"`
+
+	// Filtered 为 true 时 Total 是**筛选后**的条数，TotalAll 才是上游给的全部；
+	// 两者都给出，是因为"total 到底指什么"在加了筛选之后最容易搞错。
+	Filtered       bool           `json:"filtered"`
+	TotalAll       int            `json:"total_all"`
+	AppliedFilters *appliedFilter `json:"applied_filters,omitempty"`
+	Error          string         `json:"error,omitempty"`
 }
 
 func (a *App) handleAPISearch(w http.ResponseWriter, r *http.Request) {
@@ -750,10 +788,19 @@ func (a *App) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 		truncated = true
 	}
 
-	// 筛选项基于**全量**结果，否则翻到第 2 页时下拉框里的站点会凭空少几个。
-	sites, sections, categories := collectFacets(items)
+	flt := parseSearchFilter(r)
 
-	win := slicePage(items, pageFromQuery(r), cfg.PageSize)
+	// 筛选项基于**筛选前**的全量结果，否则翻到第 2 页时下拉框里的站点会凭空少几个。
+	// 这里与页面走的是同一份筛选实现，接口和界面不会给出两套结果。
+	sites := facetList(items, func(t Torrent) string { return t.Site })
+	sections := facetList(items, func(t Torrent) string { return t.Section })
+	categories := facetList(items, func(t Torrent) string { return t.Category })
+	allTotal := len(items)
+
+	filtered := flt.apply(items)
+	sortTorrents(filtered, flt.Sort)
+
+	win := slicePage(filtered, pageFromQuery(r), cfg.PageSize)
 	resp := apiResponse{
 		Keyword:    keyword,
 		Count:      len(win.Items),
@@ -766,6 +813,10 @@ func (a *App) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 		Sections:   sections,
 		Categories: categories,
 		Truncated:  truncated,
+		// 筛选前后都给出来，调用方才知道 total 是"筛过的"还是"全部的"。
+		Filtered:       flt.active(),
+		TotalAll:       allTotal,
+		AppliedFilters: flt.applied(),
 	}
 	if resp.Torrents == nil {
 		resp.Torrents = []Torrent{}

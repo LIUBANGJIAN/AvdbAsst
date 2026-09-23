@@ -241,7 +241,9 @@ code {
   width: 100%;
   max-width: var(--page-max);
   margin: 0 auto;
-  padding: var(--sp-5);
+  /* 顶部只留 12px：筛选栏与顶栏本就贴在一起，多出来的留白全是白扔的，
+   * 而它换来的正是"下面能多显示一行结果"。 */
+  padding: var(--sp-3) var(--sp-5) var(--sp-5);
   flex: 1 0 auto;
 }
 .wrap-narrow { max-width: 860px; }
@@ -328,32 +330,37 @@ code {
 .hero .alert { margin: var(--sp-5) auto 0; text-align: left; }
 
 /* ---------------------------------------------------------------- 筛选栏 */
+/* 这一条整体上移了一些：它上面只有 --sp-3 的留白，加上更紧凑的内边距与
+ * 行高，用户在屏幕上看到的第一屏里，结果列表能多出两三行。
+ *
+ * 宽度也做了压缩：多塞一个「标题过滤」输入框之后，原来的控件宽度会让整条
+ * 工具栏折成两行——那就等于把省下来的留白又还回去了。 */
 .toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: flex-end;
-  gap: var(--sp-3) var(--sp-4);
-  padding: var(--sp-4);
-  margin-bottom: var(--sp-4);
+  gap: 8px var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: 10px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   box-shadow: var(--sh-1);
 }
 
-.field { display: flex; flex-direction: column; gap: 5px; }
-.field label { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.field { display: flex; flex-direction: column; gap: 3px; }
+.field label { font-size: 12px; color: var(--text-muted); font-weight: 500; line-height: 1.2; }
 
 .field select,
 .field input {
-  padding: 8px 12px;
+  padding: 7px 11px;
   font: inherit;
   font-size: 14px;
   color: var(--text);
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-sm);
-  min-width: 120px;
+  min-width: 104px;
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
 .field select:hover, .field input:hover { border-color: #c6cee0; }
@@ -363,32 +370,50 @@ code {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* 标题过滤框占掉行末剩下的空间：它承载的自由文本最长，值得宽一点；
+ * 上限 240px 是为了不让它把左边的下拉框挤到第二行去——
+ * 工具栏一旦折行，省下来的留白就又还回去了。 */
+.field-filter { flex: 1 1 150px; min-width: 0; max-width: 240px; }
+.field-filter input { width: 100%; min-width: 0; }
+
 .chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 
+/* 属性筛选是**链接**而不是按钮：禁用 JS 时点它照样能带上条件重新加载。
+ * 因此要显式去掉链接的下划线与默认蓝色，让它们看起来仍是一枚"切换钮"。 */
 .chip {
-  padding: 7px 14px;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 13px;
   font: inherit;
   font-size: 13px;
+  line-height: 1.4;
   color: var(--text-muted);
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
   border-radius: var(--r-pill);
   cursor: pointer;
   white-space: nowrap;
+  text-decoration: none;
   transition: all var(--dur) var(--ease);
 }
-.chip:hover { border-color: var(--accent); color: var(--accent-ink); }
+.chip:hover, .chip:focus {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  text-decoration: none;
+}
 .chip.is-on {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--on-accent);
   font-weight: 500;
 }
+.chip.is-on:hover { color: var(--on-accent); }
 
-.toolbar .btn { margin-left: auto; }
+/* 「重置」紧跟在筛选控件之后，不推到行末：
+ * 它和左边的条件是同一组东西，孤零零挂在右边反而像另一件事。 */
 
 /* ------------------------------------------------------------------ 统计 */
-.stats { margin: 0 0 var(--sp-3); color: var(--text-muted); font-size: 14px; }
+.stats { margin: 0 0 10px; color: var(--text-muted); font-size: 14px; }
 .stats strong { color: var(--text); font-weight: 600; }
 .stats-warn { color: var(--warn); }
 
@@ -621,7 +646,7 @@ code {
 }
 
 /* 每页条数：和筛选器同排，用 label 与下拉框而不是按钮，改完即生效 */
-.page-size-form select { min-width: 104px; }
+#page_size { min-width: 88px; }
 
 /* ------------------------------------------------------------- 空态 */
 .empty {
@@ -836,9 +861,10 @@ body.has-batchbar .toast { bottom: 96px; }
   .field-spacer { display: none; }
 
   .toolbar { padding: var(--sp-3); }
-  .toolbar .btn { margin-left: 0; }
   .field select, .field input { min-width: 0; width: 100%; }
   .field { flex: 1 1 140px; }
+  /* 标题过滤框独占一行：它要装的是自由文本，挤在窄屏的半行里没法看 */
+  .field-filter { flex: 1 1 100%; max-width: none; }
 
   /* 窄屏上顶部导航的「搜索」和正下方那颗搜索按钮是同一个入口，去掉前者的重复感 */
   .topnav-with-search a[href="/"] { display: none; }

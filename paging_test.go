@@ -95,19 +95,19 @@ func TestPagerURLKeepsKeywordOnlyWhenNeeded(t *testing.T) {
 		{"中文 关键词", 2, "/s?page=2&q=%E4%B8%AD%E6%96%87+%E5%85%B3%E9%94%AE%E8%AF%8D"},
 	}
 	for _, tc := range cases {
-		if got := pagerURL(tc.keyword, tc.page); got != tc.want {
+		if got := pagerURL(tc.keyword, searchFilter{}, tc.page); got != tc.want {
 			t.Errorf("pagerURL(%q, %d) = %q，期望 %q", tc.keyword, tc.page, got, tc.want)
 		}
 	}
 	// 关键属性：翻页链接里**不能**出现 page_size。
 	// 每页条数是已落盘的偏好，靠链接反复重发只会让它看起来像一次性参数。
-	if got := pagerURL("abc", 2); strings.Contains(got, "page_size") {
+	if got := pagerURL("abc", searchFilter{}, 2); strings.Contains(got, "page_size") {
 		t.Errorf("翻页链接不应携带 page_size: %s", got)
 	}
 }
 
 func TestPageLinksWindow(t *testing.T) {
-	links := pageLinks("q", 1, 20)
+	links := pageLinks("q", searchFilter{}, 1, 20)
 	if len(links) != 7 {
 		t.Fatalf("页码窗口长度 = %d，期望 7", len(links))
 	}
@@ -115,13 +115,13 @@ func TestPageLinksWindow(t *testing.T) {
 		t.Errorf("首页窗口应从 1 开始且标记当前页，实际首项 %+v", links[0])
 	}
 
-	links = pageLinks("q", 20, 20)
+	links = pageLinks("q", searchFilter{}, 20, 20)
 	if links[len(links)-1].Number != 20 || !links[len(links)-1].Current {
 		t.Errorf("末页窗口应以 20 结束且标记当前页，实际末项 %+v", links[len(links)-1])
 	}
 
 	// 页数少于窗口长度时全部列出，不出现重复或越界页码。
-	links = pageLinks("q", 2, 3)
+	links = pageLinks("q", searchFilter{}, 2, 3)
 	if len(links) != 3 {
 		t.Fatalf("总页数 3 时应列出 3 个页码，实际 %d", len(links))
 	}
@@ -325,17 +325,25 @@ func TestSettingsProbeFormDoesNotSendRetiredFields(t *testing.T) {
 	}
 }
 
-// TestSearchPageSizeFormIsUsableWithoutJS 确认每页条数的表单在禁用 JS 时仍有提交手段。
-func TestSearchPageSizeFormIsUsableWithoutJS(t *testing.T) {
+// TestSearchFilterFormIsUsableWithoutJS 确认筛选表单在禁用 JS 时仍有提交手段。
+//
+// 筛选能力全部在服务端，所以"没有 JS 就用不了"等于功能缺失；noscript 里的
+// 「应用」按钮与做成链接的属性筛选是为这条兜底的。
+func TestSearchFilterFormIsUsableWithoutJS(t *testing.T) {
 	app := newTestApp(t, upstreamWith(upstreamSample), func(c *Config) { c.PageSize = 50 })
 	body := do(app, http.MethodGet, "/s?q=abc").Body.String()
 
 	if !strings.Contains(body, `<noscript>`) {
-		t.Error("每页条数表单应提供 noscript 兜底提交按钮")
+		t.Error("筛选表单应提供 noscript 兜底提交按钮")
 	}
-	// 表单必须把关键词带上，否则改条数会把搜索结果清空。
+	// 表单必须把关键词带上，否则改筛选会把搜索结果清空。
 	if !strings.Contains(body, `name="q" value="abc"`) {
-		t.Errorf("每页条数表单应保留关键词；片段: %s", excerpt(body, "page-size-form"))
+		t.Errorf("筛选表单应保留关键词；片段: %s", excerpt(body, "filter-form"))
+	}
+	// 属性筛选是链接：无 JS 时点它也能带上条件重新加载。
+	if !strings.Contains(body, `class="chip" href="/s?`) &&
+		!strings.Contains(body, `class="chip is-on" href="/s?`) {
+		t.Errorf("属性筛选应渲染为可点击的链接；片段: %s", excerpt(body, "chips"))
 	}
 }
 
@@ -358,13 +366,48 @@ func TestPageSizeEnvAllowsZero(t *testing.T) {
 	}
 }
 
-// TestResultsPageSizeFormTargetsSearchRoute 确认表单指向的是搜索路由而不是当前路径。
-func TestResultsPageSizeFormTargetsSearchRoute(t *testing.T) {
+// TestResultsFilterFormTargetsSearchRoute 确认表单指向的是搜索路由而不是当前路径。
+func TestResultsFilterFormTargetsSearchRoute(t *testing.T) {
 	app := newTestApp(t, upstreamWith(upstreamSample), func(c *Config) { c.PageSize = 50 })
 	body := do(app, http.MethodGet, "/s/abc").Body.String()
 
-	if !strings.Contains(body, `<form class="field page-size-form" method="get" action="/s">`) {
-		t.Errorf("表单应显式指向 /s；片段: %s", excerpt(body, "page-size-form"))
+	if !strings.Contains(body, `<form class="toolbar" id="filter-form" method="get" action="/s"`) {
+		t.Errorf("筛选表单应显式指向 /s；片段: %s", excerpt(body, "filter-form"))
+	}
+}
+
+// TestFilterFormPrunesEmptyParams 守住"提交时把空字段摘掉"的脚本。
+//
+// 不摘的话，每选一次站点，地址里就会攒出
+// `&section=&category=&filter=&sort=default&page_size=100` 这样一串。
+// 更关键的是那条**例外**：GET 表单提交会整体替换 query，
+// 所以"未改动就省略"只对持久化的每页条数成立；
+// 套到 sort 上会让用户改个站点就把排序悄悄重置掉。
+func TestFilterFormPrunesEmptyParams(t *testing.T) {
+	app := newTestApp(t, upstreamWith(upstreamSample))
+	body := do(app, http.MethodGet, "/s?q=abc").Body.String()
+
+	// 每页条数带着"当前值"，脚本据此判断用户有没有动过它。
+	if !strings.Contains(body, `id="page_size" name="page_size" data-current="100"`) {
+		t.Errorf("每页条数应带上当前值；片段: %s", excerpt(body, "page_size"))
+	}
+	// 排序**不能**带这个属性：它的省略语义是"回到默认"，不是"沿用上次"。
+	if strings.Contains(body, `id="f-sort" name="sort" data-current`) {
+		t.Error("排序不该用 data-current —— 省掉一个非默认排序等于把它重置")
+	}
+
+	script, err := readWebFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"dropUntouchedFields",
+		"removeAttribute('name')",
+		"el.name === 'sort' && value === 'default'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("app.js 缺少参数清理逻辑：%s", want)
+		}
 	}
 }
 

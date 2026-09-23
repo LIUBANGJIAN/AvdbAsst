@@ -43,26 +43,15 @@ func templateFuncs() template.FuncMap {
 		// add 给结果行编号用：{{add .StartedAt $i}} 算出该行的全局序号，
 		// 模板本身没有算术能力。
 		"add": func(a, b int) int { return a + b },
-		// flags 把布尔标记压成一个以空格分隔的字符串塞进 data-flags，
-		// 让前端可以用整词匹配做筛选，避免六七个独立的 data 属性。
+		// flags 把布尔标记压成一个以空格分隔的字符串塞进 data-flags。
 		//
-		// 这里**不再包含 free**：上游返回的资源全部免费，给每条都挂一个
+		// 与服务端筛选共用 torrentFlags：两处各写一份判定的话，
+		// "标签显示有、筛选却筛不出来"这种错迟早会出现。
+		//
+		// 这里**不包含 free**：上游返回的资源全部免费，给每条都挂一个
 		// "免费"标记既没有区分度，也没有筛选价值。
 		"flags": func(t Torrent) string {
-			out := make([]string, 0, 4)
-			if t.Chinese {
-				out = append(out, "cn")
-			}
-			if t.Uncensored || t.UC {
-				out = append(out, "unc")
-			}
-			if t.UHD {
-				out = append(out, "uhd")
-			}
-			if t.HD {
-				out = append(out, "hd")
-			}
-			return strings.Join(out, " ")
+			return strings.Join(torrentFlags(t), " ")
 		},
 		// dash 让空值在表格里显示为 "-" 而不是空白。
 		"dash": func(s string) string {

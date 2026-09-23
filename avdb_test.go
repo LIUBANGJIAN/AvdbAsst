@@ -341,55 +341,6 @@ func TestNormalizeKeywordHandlesInvalidUTF8(t *testing.T) {
 	}
 }
 
-// TestCollectFacetsIsDeterministic 是本项目最重要的一条回归测试。
-//
-// 旧实现直接遍历 map 生成筛选项，导致同一份数据每次渲染顺序都不同，
-// 属于"同一输入两次结果不一致"的安静型故障。这里连跑 200 次做校验。
-func TestCollectFacetsIsDeterministic(t *testing.T) {
-	items := []Torrent{
-		{Site: "zeta", Section: "s2", Category: "c3"},
-		{Site: "alpha", Section: "s1", Category: "c1"},
-		{Site: "mike", Section: "s3", Category: "c2"},
-		{Site: "alpha", Section: "s1", Category: "c1"},
-		{Site: "beta", Section: "s2", Category: "c3"},
-	}
-
-	firstSites, firstSections, firstCategories := collectFacets(items)
-	wantSites := "alpha,beta,mike,zeta"
-	if got := strings.Join(firstSites, ","); got != wantSites {
-		t.Fatalf("站点筛选未按字典序去重: %q, 期望 %q", got, wantSites)
-	}
-	if got := strings.Join(firstSections, ","); got != "s1,s2,s3" {
-		t.Fatalf("板块筛选错误: %q", got)
-	}
-	if got := strings.Join(firstCategories, ","); got != "c1,c2,c3" {
-		t.Fatalf("分类筛选错误: %q", got)
-	}
-
-	for i := 0; i < 200; i++ {
-		sites, sections, categories := collectFacets(items)
-		if strings.Join(sites, ",") != strings.Join(firstSites, ",") ||
-			strings.Join(sections, ",") != strings.Join(firstSections, ",") ||
-			strings.Join(categories, ",") != strings.Join(firstCategories, ",") {
-			t.Fatalf("第 %d 次调用结果与首次不一致，说明存在 map 遍历顺序泄漏", i)
-		}
-	}
-}
-
-func TestCollectFacetsSkipsEmpty(t *testing.T) {
-	items := []Torrent{
-		{Site: "", Section: "", Category: ""},
-		{Site: "a", Section: "", Category: ""},
-	}
-	sites, sections, categories := collectFacets(items)
-	if len(sites) != 1 || sites[0] != "a" {
-		t.Errorf("站点筛选应只含 a，实际 %v", sites)
-	}
-	if len(sections) != 0 || len(categories) != 0 {
-		t.Errorf("空值不应进入筛选列表，实际 sections=%v categories=%v", sections, categories)
-	}
-}
-
 func TestIsRetryableStatus(t *testing.T) {
 	retryable := []int{429, 500, 502, 503, 504}
 	for _, s := range retryable {

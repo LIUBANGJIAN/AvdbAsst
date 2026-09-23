@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -628,36 +627,5 @@ func normalizeKeyword(raw string) string {
 	if runes := []rune(out); len(runes) > maxKeywordRunes {
 		out = string(runes[:maxKeywordRunes])
 	}
-	return out
-}
-
-// collectFacets 汇总去重且**排序稳定**的筛选项。
-//
-// 旧实现直接遍历 map 生成下拉框，导致同一份数据每次刷新顺序都不一样；
-// 这里显式排序，保证结果可复现。
-func collectFacets(items []Torrent) (sites, sections, categories []string) {
-	siteSet := make(map[string]struct{})
-	sectionSet := make(map[string]struct{})
-	categorySet := make(map[string]struct{})
-	for _, t := range items {
-		if t.Site != "" {
-			siteSet[t.Site] = struct{}{}
-		}
-		if t.Section != "" {
-			sectionSet[t.Section] = struct{}{}
-		}
-		if t.Category != "" {
-			categorySet[t.Category] = struct{}{}
-		}
-	}
-	return sortedKeys(siteSet), sortedKeys(sectionSet), sortedKeys(categorySet)
-}
-
-func sortedKeys(m map[string]struct{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
 	return out
 }

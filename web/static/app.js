@@ -32,29 +32,78 @@
     if (searchInput) searchInput.focus();
   });
 
-  /* ------------------------------------------------------ 每页条数即时生效 */
-  // 服务端会把选择落盘，所以这里只是"少点一次按钮"。
-  var pageSizeSel = document.getElementById('page_size');
-  if (pageSizeSel && pageSizeSel.form) {
-    pageSizeSel.addEventListener('change', function () { pageSizeSel.form.submit(); });
+/* ------------------------------------------------------------ 筛选条 */
+// 筛选条件由**服务端**在全量结果上生效（见 search_filter.go），
+// 前端只负责把条件送出去。所以这里不做任何本地过滤：
+// 本地过滤只能管到当前页这 100 条，一翻页条件就没了，
+// 用户还得重选一遍——那正是这次要修掉的行为。
+var filterForm = document.getElementById('filter-form');
+if (filterForm) {
+  // GET 表单提交会**整体替换** query，所以"少发一个字段"就等于把它清掉。
+  // 借这一点把空值与默认值摘掉，否则每选一次站点，地址里都会攒出
+  // &section=&category=&filter=&sort=default&page_size=100 这样一串。
+  //
+  // 但"省略"对每个字段的含义并不相同，规则要分开写：
+  //   · 空值：省略 = 这一项没筛，两种语义都成立；
+  //   · sort=default：省略 = 用默认排序，也对；
+  //   · 每页条数：它是**已持久化的偏好**，没改就别发（见下面的 data-current）。
+  // 反过来，一个**非默认**的排序绝不能省——GET 会整体替换 query，
+  // 省掉它等于用户改个站点就把排序悄悄重置了。
+  //
+  // 用摘掉 name 而不是设 disabled：disabled 会让控件变灰，
+  // 万一这次提交没发生（被拦下、脚本报错），用户会对着一个点不动的下拉框发呆。
+  function dropUntouchedFields() {
+    Array.prototype.forEach.call(filterForm.elements, function (el) {
+      if (!el.name || el.tagName === 'BUTTON') return;
+      var value = el.value;
+
+      if (value === '') {
+        el.removeAttribute('name');
+        return;
+      }
+      if (el.name === 'sort' && value === 'default') {
+        el.removeAttribute('name');
+        return;
+      }
+      // data-current 是服务端渲染时写下的"当前值"，只有持久化的偏好带它。
+      var current = el.getAttribute('data-current');
+      if (current !== null && value === current) {
+        el.removeAttribute('name');
+      }
+    });
   }
 
-  /* ---------------------------------------------------------------- 列表 */
+  // 覆盖回车触发的隐式提交（浏览器自己发起的提交不会走下面几个分支）。
+  filterForm.addEventListener('submit', dropUntouchedFields);
 
-  var list = document.getElementById('results');
-  if (!list) return;                   // 无结果页无需后续逻辑
+  // 下拉框改选即提交，少点一次「应用」。
+  Array.prototype.forEach.call(filterForm.querySelectorAll('select'), function (sel) {
+    sel.addEventListener('change', function () {
+      dropUntouchedFields();
+      filterForm.submit();
+    });
+  });
 
-  var rows = Array.prototype.slice.call(list.querySelectorAll('.row'));
-  var siteSel = document.getElementById('f-site');
-  var sectionSel = document.getElementById('f-section');
-  var categorySel = document.getElementById('f-category');
-  var sortSel = document.getElementById('f-sort');
-  var resetBtn = document.getElementById('f-reset');
-  var countEl = document.getElementById('result-count');
-  var noMatchEl = document.getElementById('no-match');
-  var activeFlags = [];
+  var filterInput = document.getElementById('f-filter');
+  if (filterInput) {
+    // 原生「×」清除按钮不触发提交，这里补一次——否则输入框看着清空了、
+    // 结果还是旧的，比没有清除按钮更让人困惑。
+    // 按回车时也会触发 search 事件，但那时 value 非空，不会重复提交。
+    filterInput.addEventListener('search', function () {
+      if (filterInput.value === '') {
+        dropUntouchedFields();
+        filterForm.submit();
+      }
+    });
+  }
+}
 
-  var batchBar = document.getElementById('batchbar');
+/* ---------------------------------------------------------------- 列表 */
+
+var list = document.getElementById('results');
+if (!list) return;                   // 无结果页无需后续逻辑
+
+var batchBar = document.getElementById('batchbar');
   // 操作条常驻底部，吐司要一直往上让位——这个标记只在有批量条的页面上出现。
   if (batchBar) document.body.classList.add('has-batchbar');
 
@@ -65,107 +114,9 @@
   var batchCopyBtn = document.getElementById('batch-copy');
   var batchClearBtn = document.getElementById('batch-clear');
 
-  function numberAttr(el, name) {
-    var value = parseFloat(el.getAttribute('data-' + name));
-    return isFinite(value) ? value : 0;
-  }
+/* ------------------------------------------------------- 下载 / 复制 */
 
-  function matchesFilters(row) {
-    if (siteSel.value && row.getAttribute('data-site') !== siteSel.value) return false;
-    if (sectionSel.value && row.getAttribute('data-section') !== sectionSel.value) return false;
-    if (categorySel.value && row.getAttribute('data-category') !== categorySel.value) return false;
-
-    if (activeFlags.length) {
-      // 前后补空格后用整词匹配，避免 "hd" 误命中 "uhd"。
-      var flags = ' ' + (row.getAttribute('data-flags') || '') + ' ';
-      for (var i = 0; i < activeFlags.length; i++) {
-        if (flags.indexOf(' ' + activeFlags[i] + ' ') === -1) return false;
-      }
-    }
-    return true;
-  }
-
-  function sortVisible(visible) {
-    var mode = sortSel.value;
-    if (mode === 'default') {
-      visible.sort(function (a, b) { return numberAttr(a, 'order') - numberAttr(b, 'order'); });
-    } else if (mode === 'size-desc') {
-      visible.sort(function (a, b) { return numberAttr(b, 'size') - numberAttr(a, 'size'); });
-    } else if (mode === 'size-asc') {
-      visible.sort(function (a, b) { return numberAttr(a, 'size') - numberAttr(b, 'size'); });
-    } else if (mode === 'time-desc') {
-      visible.sort(function (a, b) { return numberAttr(b, 'ts') - numberAttr(a, 'ts'); });
-    } else if (mode === 'time-asc') {
-      // ts 为 0 表示时间解析失败，排到最后而不是冒充"最早"。
-      visible.sort(function (a, b) {
-        var ta = numberAttr(a, 'ts'), tb = numberAttr(b, 'ts');
-        if (ta === 0 && tb === 0) return 0;
-        if (ta === 0) return 1;
-        if (tb === 0) return -1;
-        return ta - tb;
-      });
-    }
-  }
-
-  function apply() {
-    var visible = [];
-    for (var i = 0; i < rows.length; i++) {
-      var ok = matchesFilters(rows[i]);
-      rows[i].hidden = !ok;
-      if (ok) visible.push(rows[i]);
-    }
-
-    sortVisible(visible);
-
-    // 用文档片段一次性重排，避免逐个 append 触发多次重排。
-    var fragment = document.createDocumentFragment();
-    for (var j = 0; j < visible.length; j++) fragment.appendChild(visible[j]);
-    list.appendChild(fragment);
-
-    if (countEl) countEl.textContent = String(visible.length);
-    if (noMatchEl) noMatchEl.hidden = visible.length > 0;
-  }
-
-  [siteSel, sectionSel, categorySel, sortSel].forEach(function (el) {
-    if (el) el.addEventListener('change', apply);
-  });
-
-  var chips = Array.prototype.slice.call(document.querySelectorAll('.chip'));
-  chips.forEach(function (chip) {
-    chip.addEventListener('click', function () {
-      var flag = chip.getAttribute('data-flag');
-      var index = activeFlags.indexOf(flag);
-      if (index >= 0) {
-        activeFlags.splice(index, 1);
-        chip.classList.remove('is-on');
-        chip.setAttribute('aria-pressed', 'false');
-      } else {
-        activeFlags.push(flag);
-        chip.classList.add('is-on');
-        chip.setAttribute('aria-pressed', 'true');
-      }
-      apply();
-    });
-  });
-
-  if (resetBtn) {
-    resetBtn.addEventListener('click', function () {
-      if (siteSel) siteSel.value = '';
-      if (sectionSel) sectionSel.value = '';
-      if (categorySel) categorySel.value = '';
-      if (sortSel) sortSel.value = 'default';
-      activeFlags.length = 0;
-      chips.forEach(function (chip) {
-        chip.classList.remove('is-on');
-        chip.setAttribute('aria-pressed', 'false');
-      });
-      apply();
-    });
-  }
-
-  /* ------------------------------------------------------- 下载 / 复制 */
-
-  function setStatus(el, kind, text) {
+function setStatus(el, kind, text) {
     if (!el) return;
     el.className = 'status' + (kind ? ' is-' + kind : '');
     el.textContent = text || '';
@@ -272,6 +223,9 @@
     return checks().filter(function (box) { return box.checked; });
   }
 
+  // 筛选已在服务端完成，页面上渲染出来的每一行都是"当前条件下该显示的"，
+  // 所以它与全部行等价；仍判断 hidden 是为了防御将来可能出现的客户端隐藏，
+  // 否则「全选本页」会把看不见的行也选上。
   function visibleChecks() {
     return checks().filter(function (box) {
       var row = box.closest('.row');
@@ -444,7 +398,7 @@
   if (batchDownloadBtn) batchDownloadBtn.addEventListener('click', batchDownload);
   if (batchCopyBtn) batchCopyBtn.addEventListener('click', batchCopy);
 
-  // 首次渲染后同步一次计数、选中态与空态（服务端已给出默认值，这里保持一致）。
-  apply();
+  // 首次渲染后同步一次选中态。结果的条数、筛选后的总数都由服务端算好了，
+  // 前端不再重复计算——同一件事有两个真相，迟早会不一致。
   syncSelection();
 })();

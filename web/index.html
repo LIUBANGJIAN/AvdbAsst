@@ -66,77 +66,85 @@
     </section>
   {{end}}
 
-  {{if and (not .Error) .Keyword (not .Torrents)}}
+  {{if and (not .Error) .Keyword (not .ShowResults)}}
     <div class="empty">
       <h2>没有找到「{{.Keyword}}」</h2>
       <p>换个写法试试：番号可只搜前缀（如 <code>BOBB-456</code> → <code>BOBB</code>），或改用中文标题里的关键词。</p>
     </div>
   {{end}}
 
-  {{if .Torrents}}
-    <section class="toolbar" aria-label="筛选与排序">
+  {{if .ShowResults}}
+    {{/* 筛选条整块是一个 GET 表单，条件在**服务端**对全量结果生效。
+         早先这些条件只在前端过滤当前页的 DOM，翻到第 2 页就全丢了、
+         得重选一遍——筛选与分页必须由同一层负责，条件才谈得上"跟着翻页走"。
+
+         有 JS 时下拉框一改就提交；禁用 JS 时靠 noscript 里的「应用」。
+         属性筛选用链接而不是按钮，同样是为了无 JS 也能用。 */}}
+    <form class="toolbar" id="filter-form" method="get" action="/s" aria-label="筛选与排序">
+      <input type="hidden" name="q" value="{{.Keyword}}">
+
       <div class="field">
         <label for="f-site">站点</label>
-        <select id="f-site">
-          <option value="">全部</option>
-          {{range .Sites}}<option value="{{.}}">{{.}}</option>{{end}}
+        <select id="f-site" name="site">
+          {{range .SiteOptions}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
         </select>
       </div>
 
       <div class="field">
         <label for="f-section">板块</label>
-        <select id="f-section">
-          <option value="">全部</option>
-          {{range .Sections}}<option value="{{.}}">{{.}}</option>{{end}}
+        <select id="f-section" name="section">
+          {{range .SectionOptions}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
         </select>
       </div>
 
       <div class="field">
         <label for="f-category">分类</label>
-        <select id="f-category">
-          <option value="">全部</option>
-          {{range .Categories}}<option value="{{.}}">{{.}}</option>{{end}}
+        <select id="f-category" name="category">
+          {{range .CategoryOptions}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
         </select>
       </div>
 
       <div class="field">
         <label for="f-sort">排序</label>
-        <select id="f-sort">
-          <option value="default">默认</option>
-          <option value="size-desc">体积从大到小</option>
-          <option value="size-asc">体积从小到大</option>
-          <option value="time-desc">最新发布</option>
-          <option value="time-asc">最早发布</option>
+        <select id="f-sort" name="sort">
+          {{range .SortOptions}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
         </select>
+      </div>
+
+      {{/* 标题过滤：空格/逗号分词，词前加 - 即为排除。
+          不另设"包含/排除"开关——状态型按钮一多，用户得先看清当前模式
+          才敢输入；写在输入框里则所见即所得。 */}}
+      <div class="field field-filter">
+        <label for="f-filter">标题过滤</label>
+        <input type="search" id="f-filter" name="filter" value="{{.FilterText}}"
+               placeholder="空格分隔；-词 表示排除" autocomplete="off" spellcheck="false">
       </div>
 
       <div class="chips" role="group" aria-label="属性筛选">
-        <button type="button" class="chip" data-flag="cn" aria-pressed="false">中文字幕</button>
-        <button type="button" class="chip" data-flag="unc" aria-pressed="false">无码</button>
-        <button type="button" class="chip" data-flag="uhd" aria-pressed="false">4K</button>
-        <button type="button" class="chip" data-flag="hd" aria-pressed="false">高清</button>
+        {{range .Chips}}<a class="chip{{if .On}} is-on{{end}}" href="{{.URL}}" aria-current="{{if .On}}true{{else}}false{{end}}">{{.Label}}</a>{{end}}
       </div>
 
       {{/* 每页条数：选择即生效并**永久保存**（服务端落盘），不是一次性参数。
-          所以这个表单只带 q，不带 page——翻页位置没有保留的意义。 */}}
-      <form class="field page-size-form" method="get" action="/s">
+          它跟筛选放在同一个表单里，改条数时筛选条件一并带上，
+          不然"改个每页条数就把筛选清了"又是一处条件丢失。 */}}
+      <div class="field">
         <label for="page_size">每页</label>
-        <input type="hidden" name="q" value="{{.Keyword}}">
-        <select id="page_size" name="page_size">
+        <select id="page_size" name="page_size" data-current="{{.PageSize}}">
           {{$current := .PageSize}}
           {{range .PageSizeOptions}}<option value="{{.Value}}"{{if eq .Value $current}} selected{{end}}>{{.Label}}</option>{{end}}
         </select>
-        <noscript><button type="submit" class="btn btn-ghost">应用</button></noscript>
-      </form>
+      </div>
 
-      <button type="button" class="btn btn-ghost" id="f-reset">重置</button>
-    </section>
+      <noscript><button type="submit" class="btn btn-ghost">应用</button></noscript>
+      {{if .Filtered}}<a class="btn btn-ghost toolbar-reset" href="{{.ResetURL}}">重置</a>{{end}}
+    </form>
 
     <p class="stats">
-      {{if .Paged}}第 {{.Page}} / {{.TotalPages}} 页 · {{end}}共 <strong>{{.Total}}</strong> 条 · 本页 <strong id="result-count">{{len .Torrents}}</strong> 条
-      {{if .Truncated}}<span class="stats-warn">（结果过多，只展示前 {{.Total}} 条）</span>{{end}}
+      {{if .Paged}}第 {{.Page}} / {{.TotalPages}} 页 · {{end}}{{if .Filtered}}筛选出 <strong>{{.Total}}</strong> 条（全部 {{.TotalAll}} 条）{{else}}共 <strong>{{.Total}}</strong> 条{{end}} · 本页 <strong id="result-count">{{len .Torrents}}</strong> 条
+      {{if .Truncated}}<span class="stats-warn">（上游结果过多，只保留前 {{.TotalAll}} 条）</span>{{end}}
     </p>
 
+    {{if .Torrents}}
     {{/* 批量操作条：常驻在结果列表上方、吸在视口底部。
         刻意不随选中状态出现/消失——按钮忽隐忽现会让人以为功能不稳定，
         而且"没选中时它去哪了"本身就是个多余的问题。
@@ -221,19 +229,23 @@
         {{if .NextURL}}<a class="pager-btn" href="{{.NextURL}}" rel="next">下一页</a>
         {{else}}<span class="pager-btn is-disabled">下一页</span>{{end}}
 
+        {{/* 跳页必须把筛选条件一起带上，否则"跳一下条件就没了" */}}
         <form class="pager-jump" method="get" action="/s">
-          <input type="hidden" name="q" value="{{.Keyword}}">
-          <label for="page-jump">跳到</label>
+          {{range .FilterParams}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+          {{end}}<label for="page-jump">跳到</label>
           <input type="number" id="page-jump" name="page" min="1" max="{{.TotalPages}}" value="{{.Page}}" inputmode="numeric">
           <button type="submit" class="btn btn-ghost">跳转</button>
         </form>
       </nav>
     {{end}}
-
-    <div class="empty" id="no-match" hidden>
-      <h2>当前筛选条件下没有结果</h2>
-      <p>试试放宽站点、板块或属性筛选，或点「重置」恢复默认。</p>
-    </div>
+    {{else}}
+      {{/* 筛剩下 0 条时工具条仍然在（否则没法把条件改回来），
+          这里只负责说清楚"是筛没的，不是搜不到"。 */}}
+      <div class="empty">
+        <h2>当前筛选条件下没有结果</h2>
+        <p>共 {{.TotalAll}} 条结果里没有符合的，试试放宽条件，或 <a href="{{.ResetURL}}">重置筛选</a>。</p>
+      </div>
+    {{end}}
   {{end}}
 
 </main>

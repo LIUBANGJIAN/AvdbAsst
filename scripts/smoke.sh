@@ -118,6 +118,13 @@ else
   # 产品要求：只显示文字列表，不加载海报图
   missing  "结果页不含任何图片" "$search_page" '<img'
   contains "结果页含筛选工具条" "$search_page" 'class="toolbar"'
+  contains "结果页含标题过滤框" "$search_page" 'id="f-filter"'
+  # 筛选条件必须能在服务端生效：用一个不可能命中的站点筛一次，
+  # 页面要明确说"筛剩下 0 条"，而不是伪装成"搜不到"。
+  filtered="$(body_of "$BASE_URL/s?q=$QUERY&site=__no_such_site__")"
+  contains "筛选条件在服务端生效" "$filtered" '当前筛选条件下没有结果'
+  missing  "筛空后不再渲染结果行" "$filtered" 'class="row-check"'
+  contains "筛空后仍可改筛选"     "$filtered" 'id="filter-form"'
   # 需求：结果行带序号、支持多选与批量操作
   contains "结果行带序号"       "$search_page" 'class="row-index"'
   contains "结果行带选择框"     "$search_page" 'class="row-check"'
