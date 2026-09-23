@@ -333,13 +333,24 @@ code {
 /* 这一条整体上移了一些：它上面只有 --sp-3 的留白，加上更紧凑的内边距与
  * 行高，用户在屏幕上看到的第一屏里，结果列表能多出两三行。
  *
- * 宽度也做了压缩：多塞一个「标题过滤」输入框之后，原来的控件宽度会让整条
- * 工具栏折成两行——那就等于把省下来的留白又还回去了。 */
+ * 布局契约：**一行到底**（flex-wrap: nowrap）。这条规则踩过两次坑，都是
+ * "在某个宽度看着挺好、换个宽度就折行"：
+ *
+ * 1. 折行是由 flex 的**基准尺寸之和**决定的，不是由实际渲染宽度决定。
+ *    哪怕最后所有控件都靠收缩挤进了一行，只要基准之和超了，浏览器照样
+ *    提前断行——于是"看起来还有空位，却掉下去一个「每页」"。
+ * 2. 原生 <select> 的宽度是**最宽的那个 option 文字**撑出来的，跟
+ *    min-width 关系不大：站点里有个「色花堂4K超清」就把那个下拉撑到 130px。
+ *    所以必须显式定宽，光调 min-width 治不了。
+ *
+ * 现在：四个下拉与「每页」定宽、属性按钮定宽不收缩，**只有标题过滤框**
+ * 是伸缩项，富余多少吃多少。窄到真正放不下时才回到折行（见文件末尾的
+ * @media (max-width: 980px)），那属于移动端形态，不是"差一点没放下"。 */
 .toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: flex-end;
-  gap: 8px var(--sp-3);
+  gap: 8px;
   padding: var(--sp-3) var(--sp-4);
   margin-bottom: 10px;
   background: var(--surface);
@@ -370,20 +381,39 @@ code {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-/* 标题过滤框占掉行末剩下的空间：它承载的自由文本最长，值得宽一点；
- * 上限 240px 是为了不让它把左边的下拉框挤到第二行去——
- * 工具栏一旦折行，省下来的留白就又还回去了。 */
-.field-filter { flex: 1 1 150px; min-width: 0; max-width: 240px; }
+/* 工具栏里的下拉一律**定宽**：原生 select 的宽度由最宽的那个 option 撑开，
+ * 遇到「色花堂4K超清」这种 6 字站点名就会把整条撑到 130px，一行就放不下了。
+ * 定宽之后闭合态过长会截断（Chrome 会给省略号），展开的列表里文字仍完整——
+ * 我们要保的是"这一行放得下"，不是"每个下拉都能静态显示最长值"。
+ *
+ * min-width 必须跟着一起写：上面那条 .field select 统一给了 `min-width: 104px`，
+ * 而 CSS 里 **min-width 优先于 width**，只写 width 会被它静默顶回来
+ * （这个坑当场绊了一次：写了 96px，量出来还是 104px）。 */
+.toolbar .field select { width: 104px; min-width: 104px; text-overflow: ellipsis; }
+#page_size { width: 96px; min-width: 96px; }
+
+/* 除了标题过滤框，工具栏里的东西都不收缩。
+ * 收缩是"内部再挤一挤"，对下拉没有意义：宽度是定死的，容器一收，
+ * 下拉就从容器里溢出来，比折行还难看。要让位就整体让位（折行）。 */
+.toolbar .field:not(.field-filter) { flex: 0 0 auto; }
+
+/* 标题过滤框是这一行里**唯一**的伸缩项：富余多少吃多少，
+ * 太少也不会低于 96px（再窄就没法看了）。它是自由文本，值得多占些宽度；
+ * 四个下拉和属性按钮的宽度是可预测的，那部分挤不出空间。 */
+.field-filter { flex: 1 1 auto; min-width: 96px; max-width: 320px; }
 .field-filter input { width: 100%; min-width: 0; }
 
-.chips { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+/* 属性筛选整体不可收缩：收缩会把「中文字幕」压成「中文字…」，
+ * 而它本来就只有四个字。行内也不换行——一旦在工具栏这一行内部再折行，
+ * 工具栏高度照样变成两行。 */
+.chips { display: flex; flex-wrap: nowrap; flex: 0 0 auto; gap: 6px; }
 
 /* 属性筛选是**链接**而不是按钮：禁用 JS 时点它照样能带上条件重新加载。
  * 因此要显式去掉链接的下划线与默认蓝色，让它们看起来仍是一枚"切换钮"。 */
 .chip {
   display: inline-flex;
   align-items: center;
-  padding: 6px 13px;
+  padding: 6px 9px;
   font: inherit;
   font-size: 13px;
   line-height: 1.4;
@@ -645,8 +675,8 @@ code {
   border-radius: var(--r-sm);
 }
 
-/* 每页条数：和筛选器同排，用 label 与下拉框而不是按钮，改完即生效 */
-#page_size { min-width: 88px; }
+/* 每页条数与筛选器同排，改完即生效。
+ * 它的宽度定义跟着工具栏那组定宽规则走（见上面 #page_size）。 */
 
 /* ------------------------------------------------------------- 空态 */
 .empty {
@@ -826,6 +856,24 @@ code {
 body.has-batchbar .toast { bottom: 96px; }
 
 /* ------------------------------------------------------------------ 响应式 */
+
+/* 工具栏的折行断点单独立在这里，比下面那条 900px 的早 80px。
+ *
+ * 原因是"一行到底"的契约在极窄处会变成**水平溢出**（nowrap + 定宽 + 不可收缩），
+ * 而溢出比折行糟得多——横向滚动条会连带把整页的布局感毁掉。
+ * 所以断点必须压在这条工具栏真正放不下的临界宽度之下：
+ * 实测七件东西定宽合计约 873px（含间距），加上两级内边距与边框 ≈ 955px，
+ * 再给真实浏览器的滚动条留 15px 余量，取 980px。
+ * 窗口再窄就老实用折行形态，那是"真放不下"，不是"差一点没放下"。 */
+@media (max-width: 980px) {
+  .toolbar { flex-wrap: wrap; }
+  .toolbar .field:not(.field-filter) { flex: 0 1 116px; min-width: 0; }
+  .toolbar .field select { width: 100%; }
+  #page_size { width: 100%; }
+  .field-filter { flex: 1 1 140px; max-width: none; }
+  .chips { flex-wrap: wrap; }
+}
+
 @media (max-width: 900px) {
   .topbar-inner { flex-wrap: wrap; gap: var(--sp-3); min-height: 0; }
   .search { order: 3; flex-basis: 100%; max-width: none; }

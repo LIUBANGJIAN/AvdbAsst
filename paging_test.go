@@ -542,3 +542,125 @@ func TestLegacyConfigFileDoesNotTruncate(t *testing.T) {
 		t.Error("存量配置下也不应出现截断提示")
 	}
 }
+
+// ------------------------------------------------------------------ 样式契约
+//
+// 结果页筛选栏"一行到底"这件事，没法在 go test 里量（没有浏览器），
+// 但它踩过两次坑，而且两次都不是"某个宽度没调好"，是两个会重复出现的机制：
+//
+//  1. flex 的断行依据是**基准尺寸之和**，不是实际渲染宽度。哪怕最后靠收缩
+//     挤进了一行，只要基准之和超了，浏览器照样提前断行——
+//     于是"看着还有空位，却掉下去一个「每页」"。用户两次截图都是这个。
+//  2. 原生 <select> 的宽度由**最宽的 option 文字**撑开，与 min-width 关系不大：
+//     站点里有个「色花堂4K超清」就把那个下拉撑到 130px。所以必须显式定宽。
+//
+// 退而求其次，把**样式契约**钉住：契约被无意改掉时这条先红，
+// 比等用户再截一张图过来强。真正的行数用真浏览器量（见 README 的界面一节）。
+
+// stripCSSComments 去掉 /* ... */ 注释。
+//
+// 这一步不能省：注释里会自然地写进选择器与断点的字样（比如
+// "折行断点见 @media (max-width: 980px)"），而下面的断言是直接在
+// CSS 文本上做 Index 的——不剥注释就会匹配到注释里的文字，测试变成
+// "对着注释绿、对着代码红"。这不是假想：加上那条交叉引用的注释后，
+// 第 4 条断言当场就红了。
+func stripCSSComments(css string) string {
+	var b strings.Builder
+	for {
+		start := strings.Index(css, "/*")
+		if start < 0 {
+			b.WriteString(css)
+			return b.String()
+		}
+		b.WriteString(css[:start])
+		end := strings.Index(css[start:], "*/")
+		if end < 0 {
+			return b.String() // 注释没闭合，后面的都不要了
+		}
+		css = css[start+end+2:]
+	}
+}
+
+// squash 把空白折叠成单个空格，让断言不受换行与缩进影响。
+func squash(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// cssRule 取出样式表里某个选择器的**第一个**声明块。
+func cssRule(t *testing.T, css, selector string) string {
+	t.Helper()
+	idx := strings.Index(css, selector+" {")
+	if idx < 0 {
+		t.Fatalf("样式表里找不到规则 %q —— 契约被改掉了？", selector)
+	}
+	rest := css[idx+len(selector)+2:]
+	end := strings.Index(rest, "}")
+	if end < 0 {
+		t.Fatalf("规则 %q 的声明块没有闭合", selector)
+	}
+	return squash(rest[:end])
+}
+
+// cssMediaBlock 取出某个 @media 块的完整内容（要处理嵌套的大括号）。
+func cssMediaBlock(t *testing.T, css, header string) string {
+	t.Helper()
+	idx := strings.Index(css, header)
+	if idx < 0 {
+		t.Fatalf("样式表里找不到 %q —— 契约被改掉了？", header)
+	}
+	open := strings.Index(css[idx:], "{")
+	if open < 0 {
+		t.Fatalf("%q 后面没有声明块", header)
+	}
+	start := idx + open
+	depth := 0
+	for j := start; j < len(css); j++ {
+		switch css[j] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return squash(css[start+1 : j])
+			}
+		}
+	}
+	t.Fatalf("%q 的声明块没有闭合", header)
+	return ""
+}
+
+// TestToolbarStaysOnOneRow 守住筛选栏"一行到底"的布局契约。
+func TestToolbarStaysOnOneRow(t *testing.T) {
+	css, err := readWebFile("static/app.css")
+	if err != nil {
+		t.Fatalf("读取样式表失败: %v", err)
+	}
+	css = stripCSSComments(css)
+
+	// 1. 工具栏本体：一行到底。折行必须由断点显式放开。
+	if rule := cssRule(t, css, ".toolbar"); !strings.Contains(rule, "flex-wrap: nowrap;") {
+		t.Errorf("工具栏必须 flex-wrap: nowrap（一行到底），实际声明：%s", rule)
+	}
+
+	// 2. 下拉定宽，且 min-width 要跟着一起写。
+	//    上面那条 .field select 统一给了 min-width: 104px，而 CSS 里
+	//    **min-width 优先于 width**——只写 width 会被它静默顶回来。
+	sel := cssRule(t, css, ".toolbar .field select")
+	for _, want := range []string{"width: 104px;", "min-width: 104px;"} {
+		if !strings.Contains(sel, want) {
+			t.Errorf("工具栏下拉需要显式 %s（原生 select 的宽度由最长 option 撑开），实际声明：%s", want, sel)
+		}
+	}
+
+	// 3. 属性按钮不收缩，行内也不换行——它们本来就只有四个字，一收就成「中文字…」。
+	if rule := cssRule(t, css, ".chips"); !strings.Contains(rule, "nowrap") || !strings.Contains(rule, "flex: 0 0 auto;") {
+		t.Errorf("属性按钮组必须不收缩且不换行，实际声明：%s", rule)
+	}
+
+	// 4. 窄屏兜底：没有这个断点，nowrap + 定宽会变成**水平溢出**，
+	//    横向滚动条比折行糟得多。这是"一行到底"能不能成立的前提。
+	narrow := cssMediaBlock(t, css, "@media (max-width: 980px)")
+	if !strings.Contains(narrow, ".toolbar { flex-wrap: wrap; }") {
+		t.Errorf("窄屏需要放开折行（否则横向溢出）：980px 断点里缺少 .toolbar 的 flex-wrap: wrap；实际内容：%s", narrow)
+	}
+}
