@@ -662,6 +662,69 @@ func TestHumanizeDownloadFailureLeavesOtherErrorsAlone(t *testing.T) {
 	}
 }
 
+// TestFriendlyProbeMessageTranslatesCloudDriveError 是本轮的核心回归：
+// CloudDrive 读目录失败时，上游会把整段 gRPC 异常回给我们。
+// 界面必须只显示一句人话，绝不能把 RPC 堆栈糊到页面上——
+// 那样用户会以为"我的配置坏了"，而事实恰恰相反（下载器是好的，只是目录不存在）。
+func TestFriendlyProbeMessageTranslatesCloudDriveError(t *testing.T) {
+	raw := `CloudDrive目录读取失败：<_MultiThreadedRendezvous of RPC that terminated with:
+	status = StatusCode.NOT_FOUND
+	details = "get_subfiles of "/BON_115网盘/私存入库/AVdb" error: not found "AVdb" under "/BON_115网盘/私存入库""
+	debug_error_string = "UNKNOWN:get_subfiles of "/BON_115网盘/私存入库/AVdb" error: ... {created_time:...}"
+>`
+
+	got := friendlyProbeMessage(raw)
+
+	// 缺失的那一级要与父目录拼成完整路径——这是用户唯一需要的具体信息。
+	if !strings.Contains(got, "/BON_115网盘/私存入库/AVdb") {
+		t.Errorf("未拼出完整路径，实际 %q", got)
+	}
+	if !strings.Contains(got, "可用") {
+		t.Errorf("应说明下载器本身可用，实际 %q", got)
+	}
+	// 原始异常里的噪音一个都不许漏到界面上。
+	for _, noise := range []string{"Rendezvous", "RPC", "StatusCode", "debug_error_string", "created_time"} {
+		if strings.Contains(got, noise) {
+			t.Errorf("上游原文泄露到界面（含 %q）：%s", noise, got)
+		}
+	}
+	if n := len([]rune(got)); n > 120 {
+		t.Errorf("友好文案过长（%d 字），应当只有一句：%s", n, got)
+	}
+}
+
+// TestFriendlyProbeMessageTruncatesUnknownErrors 保证"认不出来的报错"也不会糊满页面。
+func TestFriendlyProbeMessageTruncatesUnknownErrors(t *testing.T) {
+	got := friendlyProbeMessage(strings.Repeat("异常", 300))
+	if n := len([]rune(got)); n > 200 {
+		t.Errorf("未知报错应被截断，实际 %d 字", n)
+	}
+}
+
+// TestFriendlyProbeMessageKeepsEmptyEmpty 确认空输入不产生任何提示文案。
+func TestFriendlyProbeMessageKeepsEmptyEmpty(t *testing.T) {
+	if got := friendlyProbeMessage("   "); got != "" {
+		t.Errorf("空白输入应返回空串，实际 %q", got)
+	}
+}
+
+// TestJoinDirPath 覆盖拼路径的边界：多斜杠、缺一侧、两侧都空。
+func TestJoinDirPath(t *testing.T) {
+	cases := []struct{ dir, name, want string }{
+		{"/a/b", "c", "/a/b/c"},
+		{"/a/b/", "c", "/a/b/c"},
+		{"/a/b", "/c", "/a/b/c"},
+		{"", "c", "/c"},
+		{"/a/b", "", "/a/b"},
+		{"", "", ""},
+	}
+	for _, c := range cases {
+		if got := joinDirPath(c.dir, c.name); got != c.want {
+			t.Errorf("joinDirPath(%q, %q) = %q, 期望 %q", c.dir, c.name, got, c.want)
+		}
+	}
+}
+
 // decodeJSON 是测试里解 JSON 的小包装，失败时给出原始响应体便于定位。
 func decodeJSON(t *testing.T, body []byte, target any) error {
 	t.Helper()

@@ -55,6 +55,9 @@
   var activeFlags = [];
 
   var batchBar = document.getElementById('batchbar');
+  // 操作条常驻底部，吐司要一直往上让位——这个标记只在有批量条的页面上出现。
+  if (batchBar) document.body.classList.add('has-batchbar');
+
   var checkAll = document.getElementById('check-all');
   var selCountEl = document.getElementById('sel-count');
   var batchStatusEl = document.getElementById('batch-status');
@@ -282,13 +285,13 @@
     var visibleSelected = visible.filter(function (box) { return box.checked; }).length;
 
     if (selCountEl) selCountEl.textContent = String(selected.length);
-    if (batchBar) batchBar.hidden = selected.length === 0;
-    // 提示条占用底部空间，脚部的吐司要跟着让位，否则叠在一起。
-    document.body.classList.toggle('has-selection', selected.length > 0);
 
+    // 「全选」按钮的文案随状态切换，比三态复选框直白：
+    // 用户永远知道再点一下会发生什么。
     if (checkAll) {
-      checkAll.checked = visible.length > 0 && visibleSelected === visible.length;
-      checkAll.indeterminate = visibleSelected > 0 && visibleSelected < visible.length;
+      var allPicked = visible.length > 0 && visibleSelected === visible.length;
+      checkAll.textContent = allPicked ? '取消全选' : '全选本页';
+      checkAll.setAttribute('aria-pressed', allPicked ? 'true' : 'false');
     }
   }
 
@@ -298,9 +301,12 @@
   });
 
   if (checkAll) {
-    checkAll.addEventListener('change', function () {
+    checkAll.addEventListener('click', function () {
       // 只影响**当前可见**的行：筛选之后全选，用户想选的是他看到的那些。
-      visibleChecks().forEach(function (box) { box.checked = checkAll.checked; });
+      // 已经全选时再点一下即取消，按钮文案已经写明了这一点。
+      var visible = visibleChecks();
+      var allPicked = visible.length > 0 && visible.every(function (box) { return box.checked; });
+      visible.forEach(function (box) { box.checked = !allPicked; });
       syncSelection();
     });
   }

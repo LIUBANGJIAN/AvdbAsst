@@ -9,6 +9,9 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -362,5 +365,137 @@ func TestResultsPageSizeFormTargetsSearchRoute(t *testing.T) {
 
 	if !strings.Contains(body, `<form class="field page-size-form" method="get" action="/s">`) {
 		t.Errorf("表单应显式指向 /s；片段: %s", excerpt(body, "page-size-form"))
+	}
+}
+
+// TestSearchPageHasNoResultHead 守住"不要再显示『搜索结果 xxx』"。
+//
+// 那行标题只是把用户刚输入的关键词又复述一遍（搜索框里已经有了），
+// 却占掉页面上最显眼的位置。统计行（第 x / y 页 · 共 N 条）保留，它才是有效信息。
+func TestSearchPageHasNoResultHead(t *testing.T) {
+	app := newTestApp(t, upstreamWith(upstreamSample))
+	body := do(app, http.MethodGet, "/s?q=abc").Body.String()
+
+	for _, gone := range []string{"result-head", "搜索结果"} {
+		if strings.Contains(body, gone) {
+			t.Errorf("结果页不应再出现 %q；片段: %s", gone, excerpt(body, gone))
+		}
+	}
+	// 关键词仍要留在搜索框里，否则用户看不出自己在搜什么。
+	if !strings.Contains(body, `value="abc"`) {
+		t.Error("搜索框应保留当前关键词")
+	}
+}
+
+// TestBatchBarIsAlwaysVisible 守住"按钮不用隐藏"。
+//
+// 早先批量操作条是"选中任意一项后才出现"。用户明确要求它常驻：
+// 按钮忽隐忽现会让人以为功能不稳定，而"没选中时它去哪了"本身就是个多余的问题。
+func TestBatchBarIsAlwaysVisible(t *testing.T) {
+	app := newTestApp(t, upstreamWith(upstreamSample))
+	body := do(app, http.MethodGet, "/s?q=abc").Body.String()
+
+	// 用完整开标签做断言：模板一旦退回带 hidden 的写法，这里立刻失败。
+	if !strings.Contains(body, `<div class="batchbar" id="batchbar">`) {
+		t.Errorf("批量操作条应当常驻（不带 hidden）；片段: %s", excerpt(body, "batchbar"))
+	}
+	// 「全选」是**带文字的按钮**，不是一个没有文案的复选框。
+	if !strings.Contains(body, `id="check-all">全选本页<`) {
+		t.Errorf("「全选」应是带文字的按钮；片段: %s", excerpt(body, "check-all"))
+	}
+	for _, want := range []string{"批量下载", "复制磁链", "清空选择"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("批量操作条缺少「%s」", want)
+		}
+	}
+}
+
+// TestSearchIsNotTruncatedByDefault 守住"搜索没有条数上限"。
+//
+// 默认 MaxResults 为 0（不限制），所以哪怕上游一次回 5200 条（超过早期默认的 5000），
+// 也必须一条不少地全部收下。早期实现会在页面上打出
+// 「结果过多，只展示前 5000 条」，与"没有上限"的承诺自相矛盾。
+func TestSearchIsNotTruncatedByDefault(t *testing.T) {
+	const total = 5200
+
+	app := newTestApp(t, upstreamWith(manyTorrents(total)), func(c *Config) {
+		c.PageSize = 0 // 每页「全部」，否则分页会让断言变复杂
+	})
+	if got := app.currentConfig().MaxResults; got != 0 {
+		t.Fatalf("默认 MaxResults = %d，期望 0（不限制）", got)
+	}
+
+	body := do(app, http.MethodGet, "/s?q=x").Body.String()
+	if n := strings.Count(body, `class="row"`); n != total {
+		t.Errorf("应渲染全部 %d 条，实际 %d", total, n)
+	}
+	if strings.Contains(body, "结果过多") {
+		t.Error("默认配置下不应出现截断提示")
+	}
+
+	// 显式设置安全阀时它仍要生效——这是"可选"，不是"删除"。
+	app = newTestApp(t, upstreamWith(manyTorrents(total)), func(c *Config) {
+		c.MaxResults = 100
+		c.PageSize = 0
+	})
+	body = do(app, http.MethodGet, "/s?q=x").Body.String()
+	if n := strings.Count(body, `class="row"`); n != 100 {
+		t.Errorf("显式设置安全阀 100 后应只渲染 100 条，实际 %d", n)
+	}
+}
+
+// TestLegacyConfigFileDoesNotTruncate 是用户投诉「结果过多，只展示前 5000 条」的回归锁。
+//
+// 实况：搜「HD」时上游真实返回 5954 条，页面却只肯收 5000 条并打出截断提示，
+// 954 条被无声丢掉。
+//
+// 根因不在默认值，而在**存量配置**：老版本的 Save() 会把整个 Config 落盘，
+// max_results 字段没有 omitempty，于是每一个存量的 config.json 里都躺着一个 5000。
+// 因此只把默认值从 5000 改成 0 是治不好的——升级二进制后那个 5000 照样被读回来。
+// 这条用例把"文件里写着 5000 也不能生效"钉死：数据源必须是真实的配置文件，
+// 而不是一个手工构造的 Config 字面量，否则测的就不是出问题的那条路径。
+func TestLegacyConfigFileDoesNotTruncate(t *testing.T) {
+	const total = 5954 // 真实上游在「HD」下的条数
+
+	upstream := httptest.NewServer(upstreamWith(manyTorrents(total)))
+	t.Cleanup(upstream.Close)
+
+	dir := t.TempDir()
+	// 这就是老版本写出来的文件长什么样：max_results 明晃晃地写着 5000。
+	legacy := `{"api_key":"k","default_downloader":"clouddrive",` +
+		`"default_save_path":"/x/y","max_results":5000,"page_size":0}`
+	if err := os.WriteFile(filepath.Join(dir, configFileName), []byte(legacy), 0o600); err != nil {
+		t.Fatalf("写入存量 config.json 失败: %v", err)
+	}
+
+	// 切到空目录，确保除了 dir 之外没有别的 config.json 干扰。
+	t.Chdir(t.TempDir())
+	clearConfigEnv(t)
+	t.Setenv("AVDB_CONFIG_DIR", dir)
+	t.Setenv("AVDB_API_BASE_URL", upstream.URL)
+
+	cfg, notes := ResolveConfig()
+	if cfg.MaxResults != 0 {
+		t.Fatalf("存量配置里的 max_results=5000 应被忽略，实际 MaxResults = %d", cfg.MaxResults)
+	}
+
+	// 退役字段必须报一声，不能静默改变行为。
+	warned := false
+	for _, n := range notes {
+		if strings.Contains(n, "max_results") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("退役字段应产生提示，实际 notes = %v", notes)
+	}
+
+	app := NewApp(cfg, discardLogger())
+	body := do(app, http.MethodGet, "/s?q=x").Body.String()
+	if n := strings.Count(body, `class="row"`); n != total {
+		t.Errorf("应渲染全部 %d 条，实际 %d（存量 max_results 仍在截断）", total, n)
+	}
+	if strings.Contains(body, "结果过多") {
+		t.Error("存量配置下也不应出现截断提示")
 	}
 }

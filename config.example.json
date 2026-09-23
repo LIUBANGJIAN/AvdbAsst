@@ -5,6 +5,5 @@
   "default_save_path": "",
   "listen_addr": ":8080",
   "timeout_seconds": 20,
-  "max_results": 500,
   "access_token": ""
 }

@@ -262,6 +262,29 @@ func TestProbeDownloadersPicksConfiguredOne(t *testing.T) {
 	if got := statusOf("qbittorrent"); got != probeStatusUnsupported {
 		t.Errorf("qbittorrent 应为『类型不存在』，实际 %q", got)
 	}
+
+	// 这两种状态**不带** Message：状态标签已经把结论说完了，
+	// 再贴一句上游原话（"未找到该下载工具配置"）就是重复，
+	// 而且上游说"工具"、界面说"下载器"，并排放着反而像在讲两件事。
+	messageOf := func(id string) string {
+		for _, p := range resp.Downloaders {
+			if p.ID == id {
+				return p.Message
+			}
+		}
+		return "(缺失)"
+	}
+	for _, id := range []string{"115", "transmission"} {
+		if got := messageOf(id); got != "" {
+			t.Errorf("%s 状态为『上游未配置』，不该再附备注，实际 %q", id, got)
+		}
+	}
+	for _, id := range []string{"qbittorrent", "thunder"} {
+		if got := messageOf(id); got != "" {
+			t.Errorf("%s 状态为『上游不支持此类型』，不该再附备注，实际 %q", id, got)
+		}
+	}
+
 	if len(resp.Directories) == 0 {
 		t.Error("探测到已配置的下载器时，应顺手带回目录候选")
 	}

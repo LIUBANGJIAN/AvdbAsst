@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -77,8 +78,18 @@ func TestResolveConfigFromFile(t *testing.T) {
 	if cfg.Addr != ":9000" {
 		t.Errorf("Addr = %q, 期望 :9000", cfg.Addr)
 	}
-	if cfg.MaxResults != 42 {
-		t.Errorf("MaxResults = %d, 期望 42", cfg.MaxResults)
+	if cfg.MaxResults != defaultMaxResults {
+		t.Errorf("配置文件里的 max_results 应被忽略（已退役，只认环境变量），实际 MaxResults = %d", cfg.MaxResults)
+	}
+	// 退役字段必须给一声提示，否则用户会遇到"改了没反应"的哑谜。
+	foundRetired := false
+	for _, n := range notes {
+		if strings.Contains(n, "max_results") && strings.Contains(n, "已不再生效") {
+			foundRetired = true
+		}
+	}
+	if !foundRetired {
+		t.Errorf("配置里有退役字段时应给出提示，实际 notes = %v", notes)
 	}
 	// 文件中没有出现的字段应保留默认值（叠加语义，而非整体替换）。
 	if cfg.TimeoutSec != defaultTimeoutSec {
@@ -117,8 +128,9 @@ func TestResolveConfigFileOverridesEnvSeed(t *testing.T) {
 	if cfg.APIBaseURL != "http://file-host:1" {
 		t.Errorf("APIBaseURL = %q, 配置文件应优先于环境变量", cfg.APIBaseURL)
 	}
-	if cfg.MaxResults != 7 {
-		t.Errorf("MaxResults = %d, 期望 7", cfg.MaxResults)
+	// 例外：MaxResults 是部署参数，配置文件的 7 不再作数，环境变量的 999 说了算。
+	if cfg.MaxResults != 999 {
+		t.Errorf("MaxResults = %d, 期望 999（部署参数只认环境变量）", cfg.MaxResults)
 	}
 }
 
@@ -324,6 +336,14 @@ func TestConfigSaveThenReload(t *testing.T) {
 		t.Fatalf("保存配置失败: %v", err)
 	}
 
+	// 落盘文件里不能再出现 max_results——老版本正是把 5000 写进了这里，
+	// 让"不限制条数"形同虚设。
+	if raw, err := os.ReadFile(want.ConfigPath()); err != nil {
+		t.Fatalf("读取配置文件失败: %v", err)
+	} else if bytes.Contains(raw, []byte("max_results")) {
+		t.Errorf("配置文件仍写入了 max_results：\n%s", raw)
+	}
+
 	got, _ := ResolveConfig()
 
 	// 核心断言：写进去什么，重启后就读回什么。
@@ -342,8 +362,11 @@ func TestConfigSaveThenReload(t *testing.T) {
 	if got.TimeoutSec != want.TimeoutSec {
 		t.Errorf("TimeoutSec = %d, 期望 %d", got.TimeoutSec, want.TimeoutSec)
 	}
-	if got.MaxResults != want.MaxResults {
-		t.Errorf("MaxResults = %d, 期望 %d", got.MaxResults, want.MaxResults)
+	// 这里刻意给一个非零值：它是部署参数，**不该**被写进文件，
+	// 重载后必须回到默认值（不限制）。若哪天有人把它改回可落盘，
+	// 老配置里那个 5000 就会复活，本条断言会立刻拦住。
+	if got.MaxResults != defaultMaxResults {
+		t.Errorf("MaxResults = %d, 期望 %d（部署参数不应落盘）", got.MaxResults, defaultMaxResults)
 	}
 	if got.AccessToken != want.AccessToken {
 		t.Errorf("AccessToken = %q, 期望 %q", got.AccessToken, want.AccessToken)

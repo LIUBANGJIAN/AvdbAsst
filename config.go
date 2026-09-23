@@ -22,10 +22,14 @@ const (
 	// 上游请求默认超时（秒）。
 	defaultTimeoutSec = 20
 
-	// defaultMaxResults 是**安全阀**，不是"结果上限"：页面上已不再暴露该项。
-	// 上游对宽泛关键词（如 "SSIS"）能一次返回 3000+ 条，这里只拦"异常上游回几十万条"
-	// 这种会把进程内存打满的情况。真正决定"一屏显示多少"的是 PageSize。
-	defaultMaxResults = 5000
+	// defaultMaxResults 是安全阀的**默认值**：0 = 不限制。
+	//
+	// 它曾经默认 5000，于是用户在宽泛关键词下会看到「结果过多，只展示前 5000 条」——
+	// 而本站的定位是"搜索没有上限、靠分页展示全部"，这个默认值与承诺自相矛盾。
+	// 现在默认完全不截断，只有显式配置了正整数（环境变量或配置文件）才生效。
+	// 真正决定"一屏显示多少"的始终是 PageSize。
+	defaultMaxResults = 0
+	// maxAllowedResults 是显式配置时的上界，防止有人写一个离谱的值把内存打满。
 	maxAllowedResults = 50000
 
 	// defaultPageSize 是每页展示条数，可在结果页与设置页调整并持久化。
@@ -77,9 +81,18 @@ type Config struct {
 	Addr string `json:"listen_addr"`
 	// TimeoutSec 单次上游请求超时（秒）。
 	TimeoutSec int `json:"timeout_seconds"`
-	// MaxResults 是**安全阀**：单次搜索最多接受的条目数，页面上不暴露。
-	// 语义已经从"结果上限"改成"防止异常上游把内存打满"，默认 5000，正常搜索碰不到。
-	MaxResults int `json:"max_results"`
+	// MaxResults 是可选安全阀：单次搜索最多接受的条目数。**0（默认）表示不限制**。
+	//
+	// 它属于**部署参数**（与 Addr、ConfigDir 同级），只认环境变量 AVDB_MAX_RESULTS，
+	// 配置文件里写了也不作数——所以 json tag 是 "-"，既不读出也不写入。
+	//
+	// 为什么必须从配置文件里退役：
+	//   老版本的默认值是 5000，而 Save() 会把整个结构体落盘（该字段没有 omitempty），
+	//   于是任何存量的 config.json 里都静静躺着一个 "max_results": 5000。
+	//   只把默认值改成 0 是**治不好**这个病的——升级二进制后，那个 5000 依然会被读回来，
+	//   用户照样看到「结果过多，只展示前 5000 条」，也就是他报上来的那个问题。
+	//   把这个字段从文件里彻底摘掉，存量配置才会自动恢复成"不限制"。
+	MaxResults int `json:"-"`
 	// PageSize 是结果页每页展示的条数，取值见 AllowedPageSizes()。
 	// 0 表示"全部显示"（不分页）。该值由用户在结果页或设置页选择后**持久化**，
 	// 下次打开仍然是这个值——它是偏好，不是单次请求参数。
@@ -144,6 +157,7 @@ func ResolveConfig() (Config, []string) {
 			notes = append(notes, fmt.Sprintf("%s 解析失败，该文件被忽略：%v", path, err))
 		} else {
 			notes = append(notes, fmt.Sprintf("已加载配置文件 %s", path))
+			notes = append(notes, retiredConfigKeyNotes(data)...)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		notes = append(notes, fmt.Sprintf("读取 %s 失败，已改用环境变量配置：%v", path, err))
@@ -155,6 +169,42 @@ func ResolveConfig() (Config, []string) {
 	notes = append(notes, applyDeploymentEnv(&cfg)...)
 
 	return normalizeConfig(cfg), notes
+}
+
+// retiredConfigKey 描述一个"已从配置文件退役、只认环境变量"的字段。
+type retiredConfigKey struct {
+	// Key 是配置文件里不再生效的 JSON 键。
+	Key string
+	// Env 是替代它、且唯一有效的环境变量名。
+	Env string
+}
+
+// retiredConfigKeys 列出所有退役字段。
+//
+// 退役了还要报一声，是为了避免哑谜：用户在文件里改了却不生效、
+// 又查不出原因，是最难排查的一类问题。
+var retiredConfigKeys = []retiredConfigKey{
+	{Key: "max_results", Env: "AVDB_MAX_RESULTS"},
+}
+
+// retiredConfigKeyNotes 检查配置文件里是否还残留退役字段，逐条给出替代做法。
+//
+// 解析失败时返回 nil——那种情况 ResolveConfig 已经另有"解析失败"的提示，不必重复报。
+func retiredConfigKeyNotes(data []byte) []string {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+
+	var notes []string
+	for _, retired := range retiredConfigKeys {
+		if _, present := raw[retired.Key]; present {
+			notes = append(notes, fmt.Sprintf(
+				"配置文件里的 %q 已不再生效（搜索结果现在默认不限制条数）；如需限制请改用环境变量 %s",
+				retired.Key, retired.Env))
+		}
+	}
+	return notes
 }
 
 // applyEnv 读取环境变量作为初值。
@@ -188,7 +238,8 @@ func applyEnv(cfg *Config) []string {
 	setStr(&cfg.SavePath, "AVDB_SAVE_PATH")
 	setStr(&cfg.AccessToken, "AVDB_ACCESS_TOKEN")
 	setInt(&cfg.TimeoutSec, "AVDB_TIMEOUT_SECONDS")
-	setInt(&cfg.MaxResults, "AVDB_MAX_RESULTS")
+	// 注意 AVDB_MAX_RESULTS 不在这里读：它已划归部署参数，
+	// 统一放到 applyDeploymentEnv（配置文件合并之后再定），见那里的说明。
 
 	// 每页条数允许 0（= 全部），所以不能复用 setInt（那个只收正整数）。
 	if v, ok := os.LookupEnv("AVDB_PAGE_SIZE"); ok {
@@ -206,18 +257,27 @@ func applyEnv(cfg *Config) []string {
 // 保证这些字段永远由环境说了算。
 func applyDeploymentEnv(cfg *Config) []string {
 	var notes []string
-	if v, ok := os.LookupEnv("AVDB_ADDR"); ok && strings.TrimSpace(v) != "" {
-		cfg.Addr = normalizeAddr(strings.TrimSpace(v))
-		return notes
+
+	// 监听地址三选一，按优先级取第一个有值的（AVDB_ADDR > AVDB_LISTEN > PORT）。
+	for _, key := range []string{"AVDB_ADDR", "AVDB_LISTEN", "PORT"} {
+		if v, ok := os.LookupEnv(key); ok && strings.TrimSpace(v) != "" {
+			cfg.Addr = normalizeAddr(strings.TrimSpace(v))
+			break
+		}
 	}
-	if v, ok := os.LookupEnv("AVDB_LISTEN"); ok && strings.TrimSpace(v) != "" {
-		cfg.Addr = normalizeAddr(strings.TrimSpace(v))
-		return notes
+
+	// 结果上限：与监听地址同级，只认环境变量（配置文件里的 max_results 已退役）。
+	//
+	// 这里是"非负整数"而不是"正整数"——0 是合法取值，含义是**不限制**，也就是默认值。
+	// 复用不了 applyEnv 里的 setInt：那个校验的是 n <= 0 就丢弃，会把"显式不限制"当成非法输入。
+	if v, ok := os.LookupEnv("AVDB_MAX_RESULTS"); ok && strings.TrimSpace(v) != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			cfg.MaxResults = n
+		} else {
+			notes = append(notes, fmt.Sprintf("环境变量 AVDB_MAX_RESULTS=%q 不是非负整数，已忽略（按不限制处理）", v))
+		}
 	}
-	if v, ok := os.LookupEnv("PORT"); ok && strings.TrimSpace(v) != "" {
-		// 兼容 PaaS / Docker 常见的 PORT 约定。
-		cfg.Addr = normalizeAddr(strings.TrimSpace(v))
-	}
+
 	return notes
 }
 
@@ -234,8 +294,11 @@ func normalizeConfig(cfg Config) Config {
 	// 真实值只可能来自两处：用户显式填写，或上游的 default-rule 接口。
 	cfg.SavePathOptions = normalizeStringList(cfg.SavePathOptions, 100)
 
-	if cfg.MaxResults <= 0 {
-		cfg.MaxResults = defaultMaxResults
+	// MaxResults 为 0 或负数一律归为"不限制"。
+	// 注意不能沿用"<=0 就回默认值"的写法：默认值本身就是 0（不限制），
+	// 那样写会把"显式关掉限制"误当成"没配置"。
+	if cfg.MaxResults < 0 {
+		cfg.MaxResults = 0
 	}
 	if cfg.MaxResults > maxAllowedResults {
 		cfg.MaxResults = maxAllowedResults
@@ -316,6 +379,26 @@ var supportedDownloaderIDs = []string{"clouddrive", "115", "qbittorrent", "trans
 // （其余 4 个类型都回「未找到该下载工具配置」）；而上游正是通过 CloudDrive2
 // 把离线任务投给 115 网盘。这个值只是**兜底**，设置页里填了任何值都会覆盖它。
 const fallbackDownloaderID = "clouddrive"
+
+// downloaderChoices 返回设置页「下载器」下拉的选项。
+//
+// 除了内置候选，还要把**当前配置值**并进去：用户的上游可能用了我们还不认识的
+// 新类型，若直接丢弃，下拉框会显示成另一个值，用户点一次保存就把真实配置改掉了。
+func downloaderChoices(current string) []string {
+	out := make([]string, 0, len(supportedDownloaderIDs)+1)
+	out = append(out, supportedDownloaderIDs...)
+
+	current = strings.TrimSpace(current)
+	if current == "" {
+		return out
+	}
+	for _, id := range out {
+		if id == current {
+			return out
+		}
+	}
+	return append(out, current)
+}
 
 // EffectiveDownloader 返回本次提交真正要发给上游的下载器标识。
 // 优先用户显式配置的值，为空时用兜底值——绝不会返回空串。

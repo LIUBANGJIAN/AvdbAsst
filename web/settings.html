@@ -86,35 +86,31 @@
 
     <section class="panel">
       <h2>下载</h2>
-      <p class="panel-hint">
-        上游现在把「下载器」与「保存路径」都判为必填，两者都不能留空。
-        不知道该填什么时，先点「探测可用下载器」——它只用访问令牌就能问出上游配过哪个下载器。
-      </p>
 
       <div class="field-row">
         <label for="default_downloader">下载器</label>
-        <input type="text" id="default_downloader" name="default_downloader" value="{{.Downloader}}"
-               list="downloader-options" placeholder="{{.DownloaderPlaceholder}}" spellcheck="false">
+        <select id="default_downloader" name="default_downloader">
+          {{$downloader := .Downloader}}
+          {{range .DownloaderOptions}}<option value="{{.}}"{{if eq . $downloader}} selected{{end}}>{{.}}</option>{{end}}
+        </select>
       </div>
-      <datalist id="downloader-options">
-        {{range .DownloaderOptions}}<option value="{{.}}"></option>{{end}}
-      </datalist>
 
       <div class="field-row">
         <label for="default_save_path">保存路径</label>
         <input type="text" id="default_save_path" name="default_save_path" value="{{.SavePath}}"
-               list="save-path-options" placeholder="留空将无法提交下载" spellcheck="false">
+               list="save-path-options" placeholder="/网盘目录/子目录" spellcheck="false">
       </div>
       <datalist id="save-path-options">
         {{range .SavePathOptions}}<option value="{{.}}"></option>{{end}}
       </datalist>
 
       <div class="field-actions">
-        <button type="button" class="btn btn-ghost" id="btn-probe-downloaders">探测可用下载器</button>
-        <button type="button" class="btn btn-ghost" id="btn-default-rule">读取上游默认下载器</button>
-        <button type="button" class="btn btn-ghost" id="btn-check-downloader">校验下载器并列出目录</button>
+        <button type="button" class="btn btn-ghost" id="btn-detect">检测</button>
+        <span class="test-result" id="detect-status" role="status" aria-live="polite"></span>
       </div>
-      <p class="test-result" id="downloader-result" role="status" aria-live="polite"></p>
+
+      {{/* 检测报告：点过「检测」才出现，平时不占位。 */}}
+      <ul class="detect-report" id="detect-report" hidden></ul>
     </section>
 
     <section class="panel">

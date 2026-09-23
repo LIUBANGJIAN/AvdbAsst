@@ -1,10 +1,15 @@
 /* =========================================================================
    资源搜索 · 设置页交互
-   四件事，彼此独立，任一失败不影响其余：
+   两件事，彼此独立，任一失败不影响其余：
      1. 测试连接：保存前先探一次"地址 + 令牌"能不能用；
-     2. 探测可用下载器：问上游"你到底配了哪个下载器"，返回可用的标识；
-     3. 读上游默认下载器：把上游配好的下载器 + 目录取回来填进输入框；
-     4. 校验下载器：用 API Key 问上游"这个标识存在吗、它下面有哪些目录"。
+     2. 检测：一次问清"上游配了哪个下载器、它下面有哪些目录"，并回填。
+
+   为什么只有一个「检测」按钮：
+     早先拆成三个按钮（探测可用下载器 / 读取上游默认下载器 / 校验并列出目录），
+     用户的第一反应是"该点哪个"。而这三件事对用户其实是同一个问题——
+     "我这套下载设置到底能不能用"。所以合并成一次调用，结论列成一张清单。
+     读上游默认下载器（default-rule）那条路实测在本机上游返回全空，故不再放在界面上，
+     接口仍保留在 /api/settings/default-rule 供脚本调用。
 
    全部只用访问令牌，不需要上游账号密码。
 
@@ -28,8 +33,8 @@
 
   // 只在该字段确实有值时才写回。
   //
-  // 刻意忽略空串：上游"没配某项"时返回的是空串，此时把输入框清掉是错的——
-  // 用户可能刚手填了一个自己确认可用的标识，一次读取就把它擦掉会很恼人。
+  // 刻意忽略空串：上游"没配某项"时返回的是空串，此时把控件清掉是错的——
+  // 用户可能刚选好一个自己确认可用的值，一次检测就把它擦掉会很恼人。
   // 空值在这里的含义是"这条信息没有"，不是"请改成空"。
   function setValue(id, value) {
     var el = document.getElementById(id);
@@ -102,95 +107,88 @@
     });
   }
 
-  var ruleResult = document.getElementById('downloader-result');
+  /* ------------------------------------------------------ 2. 检测下载设置 */
 
-  /* -------------------------------------------------- 2. 探测可用下载器 */
+  // 探测状态 → 界面文案。服务端只给状态码，措辞放在前端，
+  // 这样上游换了自己的报错文案，界面也不会冒出一句看不懂的英文。
+  var STATUS_LABEL = {
+    configured: '可用',
+    known: '上游未配置',
+    unsupported: '上游不支持此类型',
+    error: '探测失败，结论未知'
+  };
 
-  var probeButton = document.getElementById('btn-probe-downloaders');
+  var detectButton = document.getElementById('btn-detect');
+  var detectStatus = document.getElementById('detect-status');
+  var detectReport = document.getElementById('detect-report');
 
-  if (probeButton && ruleResult) {
-    probeButton.addEventListener('click', function () {
-      probeButton.disabled = true;
-      setResult(ruleResult, 'loading', '正在探测上游配置了哪些下载器…');
+  function clearReport() {
+    if (!detectReport) return;
+    detectReport.textContent = '';
+    detectReport.hidden = true;
+  }
+
+  function renderReport(probes, best) {
+    if (!detectReport) return;
+    detectReport.textContent = '';
+    if (!probes.length) {
+      detectReport.hidden = true;
+      return;
+    }
+
+    probes.forEach(function (probe) {
+      var item = document.createElement('li');
+      item.className = 'detect-item' + (probe.status === 'configured' ? ' is-ok' : ' is-off');
+      if (probe.id === best) item.classList.add('is-best');
+
+      var name = document.createElement('span');
+      name.className = 'detect-name';
+      name.textContent = probe.id;
+      item.appendChild(name);
+
+      var label = document.createElement('span');
+      label.className = 'detect-label';
+      label.textContent = STATUS_LABEL[probe.status] || probe.status;
+      item.appendChild(label);
+
+      // 只有"可用但读不出目录"这类需要解释的情况才带 message；
+      // 服务端已把它翻译成人话，不会再出现整段 gRPC 堆栈。
+      if (probe.message) {
+        var note = document.createElement('span');
+        note.className = 'detect-note';
+        note.textContent = probe.message;
+        item.appendChild(note);
+      }
+
+      detectReport.appendChild(item);
+    });
+
+    detectReport.hidden = false;
+  }
+
+  if (detectButton && detectStatus) {
+    detectButton.addEventListener('click', function () {
+      detectButton.disabled = true;
+      setResult(detectStatus, 'loading', '正在检测…');
+      clearReport();
 
       postJSON('/api/settings/downloaders', basePayload())
         .then(function (data) {
           if (!data) {
-            setResult(ruleResult, 'err', '探测失败');
+            setResult(detectStatus, 'err', '检测失败');
             return;
           }
-          if (data.downloaders) {
-            fillDatalist('downloader-options', data.downloaders.map(function (p) { return p.id; }));
-          }
-          // 探测到可用标识才回填：没探测到时把字段清空是错误的，
-          // 用户可能已经手填了一个自认为可用的值。
+          renderReport(data.downloaders || [], data.best);
+          // 探测到可用标识才回填，与 setValue 的"空值不覆盖"口径一致。
           setValue('default_downloader', data.best);
           fillDatalist('save-path-options', data.directories);
-          setResult(ruleResult, data.success ? 'ok' : 'err',
-            data.message || (data.success ? '探测完成' : '探测失败'));
+          setResult(detectStatus, data.success ? 'ok' : 'err',
+            data.message || (data.success ? '检测完成' : '检测失败'));
         })
         .catch(function () {
-          setResult(ruleResult, 'err', '请求失败，请检查网络或访问口令');
+          setResult(detectStatus, 'err', '请求失败，请检查网络或访问口令');
         })
-        .then(function () { probeButton.disabled = false; });
-    });
-  }
-
-  /* ------------------------------------------------- 3. 读上游默认下载器 */
-
-  var ruleButton = document.getElementById('btn-default-rule');
-
-  if (ruleButton && ruleResult) {
-    ruleButton.addEventListener('click', function () {
-      ruleButton.disabled = true;
-      setResult(ruleResult, 'loading', '正在读取上游默认下载目标…');
-
-      postJSON('/api/settings/default-rule', basePayload())
-        .then(function (data) {
-          if (!data) {
-            setResult(ruleResult, 'err', '读取失败');
-            return;
-          }
-          // 回填与 success 解耦：上游"只配了目录、没配下载器"时 success 为 false，
-          // 但那个目录是真实可用的，不能跟着一起丢掉。
-          // 服务端已经把这种半成功情形写进了 message，用户看得懂。
-          setValue('default_downloader', data.downloader);
-          setValue('default_save_path', data.save_path);
-          setResult(ruleResult, data.success ? 'ok' : 'err',
-            data.message || (data.success ? '已读取' : '读取失败'));
-        })
-        .catch(function () {
-          setResult(ruleResult, 'err', '请求失败，请检查网络或访问口令');
-        })
-        .then(function () { ruleButton.disabled = false; });
-    });
-  }
-
-  /* ------------------------------------------------------ 4. 校验下载器 */
-
-  var checkButton = document.getElementById('btn-check-downloader');
-
-  if (checkButton && ruleResult) {
-    checkButton.addEventListener('click', function () {
-      checkButton.disabled = true;
-      setResult(ruleResult, 'loading', '正在校验下载器…');
-
-      var payload = basePayload();
-      payload.set('downloader_id', valueOf('default_downloader'));
-
-      postJSON('/api/settings/directories', payload)
-        .then(function (data) {
-          if (data && data.success) {
-            setResult(ruleResult, 'ok', data.message || '校验通过');
-            fillDatalist('save-path-options', data.directories);
-          } else {
-            setResult(ruleResult, 'err', (data && data.message) || '校验失败');
-          }
-        })
-        .catch(function () {
-          setResult(ruleResult, 'err', '请求失败，请检查网络或访问口令');
-        })
-        .then(function () { checkButton.disabled = false; });
+        .then(function () { detectButton.disabled = false; });
     });
   }
 })();

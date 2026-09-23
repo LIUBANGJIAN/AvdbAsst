@@ -617,8 +617,8 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 			a.log.Warn("搜索失败", "keyword", keyword, "err", err)
 			data.Error = searchErrorMessage(err)
 		default:
-			// MaxResults 是安全阀，不是"结果上限"：正常搜索碰不到它。
-			if len(items) > cfg.MaxResults {
+			// MaxResults 是可选安全阀：默认 0 表示不限制，搜索结果全部保留。
+			if cfg.MaxResults > 0 && len(items) > cfg.MaxResults {
 				items = items[:cfg.MaxResults]
 				data.Truncated = true
 			}
@@ -745,7 +745,7 @@ func (a *App) handleAPISearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	truncated := false
-	if len(items) > cfg.MaxResults {
+	if cfg.MaxResults > 0 && len(items) > cfg.MaxResults {
 		items = items[:cfg.MaxResults]
 		truncated = true
 	}
@@ -1147,10 +1147,9 @@ type settingsViewData struct {
 	Downloader string
 	SavePath   string
 
-	// DownloaderPlaceholder 在「下载器」输入框为空时提示兜底值，
-	// 免得用户以为自己留空就等于"上游自己会选"——上游现在已经不会替他选了。
-	DownloaderPlaceholder string
-	// DownloaderOptions 是上游已知的下载器类型标识，仅用于 <datalist> 提示。
+	// DownloaderOptions 是「下载器」下拉的选项（内置候选 + 当前配置值）。
+	// 用下拉而不是自由文本：用户无从知道合法取值有哪些，
+	// 而自由文本一旦输入就无法"取消选择"，只能删掉重打。
 	DownloaderOptions []string
 
 	// PageSize 是每页展示条数，PageSizeOptions 是可选值（含 0 = 全部）。
@@ -1195,8 +1194,7 @@ func (a *App) buildSettingsData(cfg Config) settingsViewData {
 		Downloader: cfg.Downloader,
 		SavePath:   cfg.SavePath,
 
-		DownloaderPlaceholder: "留空 = 使用兜底标识 " + fallbackDownloaderID,
-		DownloaderOptions:     append([]string(nil), supportedDownloaderIDs...),
+		DownloaderOptions: downloaderChoices(cfg.Downloader),
 
 		PageSize:        cfg.PageSize,
 		PageSizeOptions: pageSizeOptions(cfg.PageSize),

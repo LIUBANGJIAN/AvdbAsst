@@ -66,13 +66,6 @@
     </section>
   {{end}}
 
-  {{if and (not .Error) .Keyword}}
-    <h1 class="result-head">
-      <span class="result-head-label">搜索结果</span>
-      <span class="result-head-kw">{{.Keyword}}</span>
-    </h1>
-  {{end}}
-
   {{if and (not .Error) .Keyword (not .Torrents)}}
     <div class="empty">
       <h2>没有找到「{{.Keyword}}」</h2>
@@ -144,13 +137,13 @@
       {{if .Truncated}}<span class="stats-warn">（结果过多，只展示前 {{.Total}} 条）</span>{{end}}
     </p>
 
-    {{/* 批量操作条：固定在视口底部，选中任何一项后才出现。
+    {{/* 批量操作条：常驻在结果列表上方、吸在视口底部。
+        刻意不随选中状态出现/消失——按钮忽隐忽现会让人以为功能不稳定，
+        而且"没选中时它去哪了"本身就是个多余的问题。
         用 position: sticky 而不是在文档流里插一段，是为了不引入任何布局位移——
         上半页跳动的问题已经够多了，不能自己再制造一个。 */}}
-    <div class="batchbar" id="batchbar" hidden>
-      <label class="batch-all">
-        <input type="checkbox" id="check-all"> 全选本页
-      </label>
+    <div class="batchbar" id="batchbar">
+      <button type="button" class="btn btn-ghost batch-all" id="check-all">全选本页</button>
       <span class="batch-count">已选 <strong id="sel-count">0</strong> 项</span>
       <button type="button" class="btn btn-primary" id="batch-download">批量下载</button>
       <button type="button" class="btn btn-ghost" id="batch-copy">复制磁链</button>

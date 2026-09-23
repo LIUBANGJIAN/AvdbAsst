@@ -96,7 +96,7 @@ contains "设置页含保存路径字段"   "$settings" 'name="default_save_path
 contains "设置页含每页条数字段"   "$settings" 'name="page_size"'
 contains "设置页含访问口令字段"   "$settings" 'name="access_token"'
 contains "设置页含测试连接按钮"   "$settings" 'id="btn-test"'
-contains "设置页含探测下载器按钮" "$settings" 'id="btn-probe-downloaders"'
+contains "设置页含检测按钮"     "$settings" 'id="btn-detect"'
 # 已下线的两个高级项不得再出现在页面上
 missing  "设置页已下线请求超时项" "$settings" 'name="timeout_seconds"'
 missing  "设置页已下线结果上限项" "$settings" 'name="max_results"'

@@ -40,7 +40,7 @@ func newTestApp(t *testing.T, upstream http.HandlerFunc, mutate ...func(*Config)
 		Addr:       ":0",
 		TimeoutSec: 5,
 		Timeout:    5 * time.Second,
-		// 与生产默认值保持一致：安全阀开在 5000，每页 100 条。
+		// 与生产默认值保持一致：安全阀关闭（0 = 不限制），每页 100 条。
 		// 早先这里是 100/100，会让"翻页"根本没有发生的空间。
 		MaxResults: defaultMaxResults,
 		PageSize:   defaultPageSize,
@@ -1035,8 +1035,19 @@ func TestSettingsPageRenders(t *testing.T) {
 	if !strings.Contains(body, `id="btn-test"`) {
 		t.Error("设置页面缺少测试连接按钮")
 	}
-	if !strings.Contains(body, `id="btn-probe-downloaders"`) {
-		t.Error("设置页面缺少「探测可用下载器」按钮")
+	// 下载相关只保留一个「检测」按钮：早先的三个按钮（探测 / 读默认 / 校验）
+	// 对用户是同一个问题，拆开后第一反应变成"我该点哪个"。
+	if !strings.Contains(body, `id="btn-detect"`) {
+		t.Error("设置页面缺少「检测」按钮")
+	}
+	for _, gone := range []string{`id="btn-probe-downloaders"`, `id="btn-default-rule"`, `id="btn-check-downloader"`} {
+		if strings.Contains(body, gone) {
+			t.Errorf("设置页面不应再出现已合并的按钮 %s", gone)
+		}
+	}
+	// 「下载器」必须是下拉选择：自由文本一旦输入就无法"取消选择"，只能删掉重打。
+	if !strings.Contains(body, `<select id="default_downloader"`) {
+		t.Error("「下载器」应当是下拉选择，而不是自由文本输入框")
 	}
 }
 

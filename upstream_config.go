@@ -15,8 +15,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -203,11 +205,16 @@ func (c *AvdbClient) ProbeDownloader(ctx context.Context, id string) DownloaderP
 	msg := shortError(upErr)
 	switch {
 	case containsAnyFold(msg, unsupportedDownloaderHints):
-		return DownloaderProbe{ID: id, Status: probeStatusUnsupported, Message: msg}
+		// 前两种情况**不带** Message：状态标签本身（"上游未配置"/"上游不支持此类型"）
+		// 已经把结论说完了，再贴一句上游原话（"未找到该下载工具配置"）纯属重复，
+		// 而且上游用"工具"、我们用"下载器"，并排放着反而让人以为说的是两件事。
+		return DownloaderProbe{ID: id, Status: probeStatusUnsupported}
 	case containsAnyFold(msg, unconfiguredDownloaderHints):
-		return DownloaderProbe{ID: id, Status: probeStatusKnown, Message: msg}
+		return DownloaderProbe{ID: id, Status: probeStatusKnown}
 	default:
-		return DownloaderProbe{ID: id, Status: probeStatusConfigured, Message: msg}
+		// 已配置。到这里说明目录没读成功，Message 的作用只剩"解释为什么列不出目录"，
+		// 所以翻译成人话再回给界面。
+		return DownloaderProbe{ID: id, Status: probeStatusConfigured, Message: friendlyProbeMessage(msg)}
 	}
 }
 
@@ -239,6 +246,61 @@ func containsAnyFold(text string, needles []string) bool {
 		}
 	}
 	return false
+}
+
+// ------------------------------------------------------ 探测报错的友好化
+
+// cloudDriveMissingPathPattern 从 CloudDrive 的 gRPC 异常里抠出"哪一级目录不存在"。
+//
+// 上游原文形如：
+//
+//	get_subfiles of "/a/b/c" error: not found "c" under "/a/b"
+//
+// 两段分别是缺失的那一级与它的父目录，拼起来才是用户真正需要的完整路径。
+var cloudDriveMissingPathPattern = regexp.MustCompile(`not found "([^"]+)" under "([^"]+)"`)
+
+// dirMissingHints 是"目录不存在"类异常的兜底识别片段。
+var dirMissingHints = []string{"StatusCode.NOT_FOUND", "not found"}
+
+// friendlyProbeMessage 把"已配置但读不出目录"的上游报错压成一句人能读懂的话。
+//
+// 为什么必须翻译：CloudDrive 读目录失败时，上游会把整段 gRPC 异常回给我们——
+// StatusCode、details、debug_error_string、created_time，外加一批 RPC 内部字段。
+// 原样贴到页面上，用户只会得出"我的配置坏了"这个**错误**结论；
+// 事实恰恰相反：那个下载器是好的，只是它记录的目标目录在网盘上不存在。
+//
+// 翻译后只保留两条对用户真正有用的信息：下载器可用；目录不存在，且不影响提交下载。
+func friendlyProbeMessage(msg string) string {
+	trimmed := strings.TrimSpace(msg)
+	if trimmed == "" {
+		return ""
+	}
+
+	if m := cloudDriveMissingPathPattern.FindStringSubmatch(trimmed); m != nil {
+		return fmt.Sprintf("下载器可用；它记录的目录 %q 在网盘上不存在，因此列不出目录（不影响提交下载）。",
+			joinDirPath(m[2], m[1]))
+	}
+	if containsAnyFold(trimmed, dirMissingHints) {
+		return "下载器可用；读取目录时上游报「目录不存在」，因此列不出目录（不影响提交下载）。"
+	}
+	// 认不出来的情况宁可少给信息，也不要让一段 RPC 堆栈糊满页面。
+	return truncateForDisplay(trimmed, 160)
+}
+
+// joinDirPath 拼接父目录与其中的一级名字，并避免出现双斜杠。
+func joinDirPath(dir, name string) string {
+	dir = strings.TrimRight(strings.TrimSpace(dir), "/")
+	name = strings.TrimLeft(strings.TrimSpace(name), "/")
+	switch {
+	case dir == "" && name == "":
+		return ""
+	case dir == "":
+		return "/" + name
+	case name == "":
+		return dir
+	default:
+		return dir + "/" + name
+	}
 }
 
 // upstreamMessage 尽力从上游响应里抠出一句人能读懂的错误。

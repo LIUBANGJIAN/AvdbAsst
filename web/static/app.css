@@ -327,17 +327,6 @@ code {
 .hero p { margin: 0; color: var(--text-muted); font-size: 15px; }
 .hero .alert { margin: var(--sp-5) auto 0; text-align: left; }
 
-.result-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: var(--sp-2);
-  margin-bottom: var(--sp-4);
-  font-size: 22px;
-}
-.result-head-label { color: var(--text-muted); font-weight: 500; font-size: 15px; }
-.result-head-kw { font-weight: 600; }
-
 /* ---------------------------------------------------------------- 筛选栏 */
 .toolbar {
   display: flex;
@@ -560,17 +549,9 @@ code {
   border-radius: var(--r-lg);
   box-shadow: var(--sh-3);
 }
-.batchbar[hidden] { display: none; }
-.batch-all {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13.5px;
-  color: var(--text-muted);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.batch-all input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+/* 「全选」是按钮而不是复选框：它的作用范围是"当前可见的行"
+ * （筛选之后全选，用户想选的是他看到的那些），带文字的按钮比三态复选框更好懂。 */
+.batch-all { white-space: nowrap; }
 .batch-count { font-size: 14px; color: var(--text); white-space: nowrap; }
 .batch-count strong { font-variant-numeric: tabular-nums; }
 .batch-status { flex: 1 1 220px; min-width: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -744,6 +725,42 @@ code {
 .test-result.is-err     { color: var(--danger); }
 .test-result.is-loading { color: var(--text-muted); }
 
+/* 检测报告：一行一个候选下载器，状态用颜色区分，补充说明另起一行。
+ * 之所以不用一段大段文字：用户要回答的是"哪个能用"，列表比句子快得多。 */
+.detect-report {
+  list-style: none;
+  margin: var(--sp-4) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.detect-report[hidden] { display: none; }
+.detect-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px var(--sp-3);
+  padding: 8px 12px;
+  font-size: 13.5px;
+  background: var(--surface-2);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--r-sm);
+}
+.detect-item.is-ok { border-left-color: var(--ok); }
+.detect-item.is-best { background: var(--accent-soft); }
+.detect-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+}
+.detect-label { color: var(--text-muted); }
+.detect-item.is-ok .detect-label { color: var(--ok); }
+.detect-note {
+  flex: 1 1 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .form-actions {
   display: flex;
   flex-wrap: wrap;
@@ -780,8 +797,8 @@ code {
   z-index: 50;
 }
 .toast:not([hidden]) { opacity: 1; transform: translateX(-50%) translateY(0); }
-/* 批量操作条占着底部时，吐司往上让位，否则两层叠在一起谁都看不清 */
-body.has-selection .toast { bottom: 84px; }
+/* 批量操作条常驻底部，吐司始终往上让位，否则两层叠在一起谁都看不清 */
+body.has-batchbar .toast { bottom: 96px; }
 
 /* ------------------------------------------------------------------ 响应式 */
 @media (max-width: 900px) {
