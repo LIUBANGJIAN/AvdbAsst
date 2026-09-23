@@ -144,6 +144,103 @@ func unwrapEnvelope(body []byte) json.RawMessage {
 	return env.Data
 }
 
+// ---------------------------------------------------------- 下载器类型探测
+
+// 上游对 /api/v1/config/downloader/directories 的三种回答。
+// 前两种是固定文案，用它来反推"这个类型到底存不存在、配没配"。
+const (
+	probeStatusConfigured  = "configured"  // 类型存在且已配置（能读目录，或读目录时报的是它自己的错）
+	probeStatusKnown       = "known"       // 类型存在，但上游没配置
+	probeStatusUnsupported = "unsupported" // 上游压根不认识这个标识
+	probeStatusError       = "error"       // 连不上/响应异常，结论未知
+)
+
+var (
+	// unsupportedDownloaderHints 命中它说明这个标识不在上游的类型枚举里。
+	unsupportedDownloaderHints = []string{"不支持的下载工具", "unsupported downloader", "unknown downloader type"}
+	// unconfiguredDownloaderHints 命中它说明类型合法、但上游没有对应配置。
+	unconfiguredDownloaderHints = []string{"未找到该下载工具配置", "未找到该下载器配置", "not configured"}
+)
+
+// DownloaderProbe 是单个下载器类型的探测结果。
+type DownloaderProbe struct {
+	ID          string   `json:"id"`
+	Status      string   `json:"status"`
+	Message     string   `json:"message,omitempty"`
+	Directories []string `json:"directories,omitempty"`
+}
+
+// Configured 表示这个类型确实在上游配置过，可以用它提交下载。
+func (p DownloaderProbe) Configured() bool { return p.Status == probeStatusConfigured }
+
+// ProbeDownloader 探测单个下载器类型。
+//
+// 判断依据来自实测的三种回答：
+//
+//	未找到该下载工具配置  → 类型存在，但没配
+//	不支持的下载工具      → 类型不存在
+//	其余（含 CloudDrive 报的目录读取失败）→ 类型存在且已配置
+//
+// 最后一条是关键：CloudDrive 的目录接口会因为"网盘上没这个目录"而失败，
+// 但那恰恰证明它**配过了**。所以不能用 code==0 当作"已配置"的判据。
+func (c *AvdbClient) ProbeDownloader(ctx context.Context, id string) DownloaderProbe {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return DownloaderProbe{Status: probeStatusError, Message: "下载器标识不能为空"}
+	}
+
+	dirs, err := c.DownloaderDirectories(ctx, id)
+	if err == nil {
+		return DownloaderProbe{ID: id, Status: probeStatusConfigured, Directories: dirs}
+	}
+
+	var upErr *UpstreamError
+	if !errors.As(err, &upErr) {
+		// 传输层错误（连不上、超时）：这与"下载器是否存在"无关，不能下结论。
+		return DownloaderProbe{ID: id, Status: probeStatusError, Message: shortError(err)}
+	}
+
+	msg := shortError(upErr)
+	switch {
+	case containsAnyFold(msg, unsupportedDownloaderHints):
+		return DownloaderProbe{ID: id, Status: probeStatusUnsupported, Message: msg}
+	case containsAnyFold(msg, unconfiguredDownloaderHints):
+		return DownloaderProbe{ID: id, Status: probeStatusKnown, Message: msg}
+	default:
+		return DownloaderProbe{ID: id, Status: probeStatusConfigured, Message: msg}
+	}
+}
+
+// ProbeDownloaders 依次探测候选标识，返回全部结果与"第一个已配置的标识"。
+//
+// 串行而非并发：上游是本地服务，5 次探测耗时可以忽略，串行还能让报错顺序可复现。
+func (c *AvdbClient) ProbeDownloaders(ctx context.Context, ids []string) ([]DownloaderProbe, string) {
+	out := make([]DownloaderProbe, 0, len(ids))
+	best := ""
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			break
+		}
+		p := c.ProbeDownloader(ctx, id)
+		out = append(out, p)
+		if best == "" && p.Configured() {
+			best = p.ID
+		}
+	}
+	return out, best
+}
+
+// containsAnyFold 大小写不敏感地判断文本是否包含任一特征片段。
+func containsAnyFold(text string, needles []string) bool {
+	lower := strings.ToLower(text)
+	for _, n := range needles {
+		if strings.Contains(lower, strings.ToLower(n)) {
+			return true
+		}
+	}
+	return false
+}
+
 // upstreamMessage 尽力从上游响应里抠出一句人能读懂的错误。
 // 覆盖三种常见形态：{message}、{detail: "..."}、FastAPI 的 {detail: [...]}。
 func upstreamMessage(body []byte) string {

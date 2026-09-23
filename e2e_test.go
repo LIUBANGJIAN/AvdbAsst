@@ -16,22 +16,34 @@ import (
 // ---------------------------------------------------------------------------
 // 严格上游：复刻真实 Avdb 的下载接口契约
 //
-// 线上报过的错：
+// 这条接口的契约被上游改过，本站也随之连踩三次坑，最后以**实测**为准：
 //
-//	上游参数校验失败（422）（HTTP 422）：
-//	{"detail":[{"type":"missing","loc":["query","save_path"],"msg":"Field required","input":null}]}
+//	tid        必填，缺失 422
+//	downloader 必填，缺失 422（早期是选填，"留空即继承全局默认"那条路已被关掉）
+//	save_path  必填，缺失 422；**传空串则回「保存目录不能为空」**
 //
-// 也就是说官方文档写"选填"的 downloader / save_path，实际是**必填** query 参数。
-// 这个假上游故意照抄这份严格契约，任何参数缺失都返回 422 —— 只要客户端退回
-// "非空才发送"的旧写法，这一组测试就会立刻失败。
+// 三个参数一个都不能少，后两个还不能是空值。这个假上游照抄这份严格契约：
+// 只要客户端退回"少发参数"或"发空值"的旧写法，这一组测试就会立刻失败。
 // ---------------------------------------------------------------------------
 
 // downloadRequiredParams 是下载接口**必填**的 query 参数。
 //
-// downloader 不在其列：官方文档标它是"选填"，实测也确实如此——缺了它不会 422。
-// 它的坑在别处：传空串会被上游当成一个名叫"空"的下载器，回 `未找到下载器`。
-// 所以正确姿势是"有值才带"，见 avdb.go 的 SubmitDownload。
-var downloadRequiredParams = []string{"tid", "save_path"}
+// downloader 从"选填"变成"必填"是上游改版的结果，不是笔误——它的 openapi.json
+// 里这个参数标着 `required: true`。所以本站不再有"留空即交给上游"这条路。
+var downloadRequiredParams = []string{"tid", "downloader", "save_path"}
+
+// knownDownloaders 是假上游认识的下载器标识。
+// 不在这个集合里的值会拿到 `未找到下载器: Downloader.xxx`，与真实上游一致。
+var knownDownloaders = []string{"clouddrive", "115", "qbittorrent", "transmission", "thunder"}
+
+func isKnownDownloader(id string) bool {
+	for _, k := range knownDownloaders {
+		if k == id {
+			return true
+		}
+	}
+	return false
+}
 
 type recordedRequest struct {
 	Method string
@@ -103,16 +115,21 @@ func (s *strictUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			upstreamWriteJSON(w, http.StatusUnprocessableEntity, map[string]any{"detail": missing})
 			return
 		}
-		// 复刻真实上游对"空标识"的处理：传了就要能查到，传空串一律视为
-		// "名为空的下载器"而拒绝。这条断言是本次修复的核心——
-		// 若客户端把"留空"实现成"发空串"，这里必须炸。
-		if v, present := r.URL.Query()["downloader"]; present {
-			if strings.TrimSpace(v[0]) == "" {
-				upstreamWriteJSON(w, http.StatusOK, map[string]any{
-					"code": 1, "message": "未找到下载器: ",
-				})
-				return
-			}
+		// 复刻真实上游对两个目标参数的处理：save_path 不接受空值，
+		// downloader 必须是一个它认识并且配置过的标识。
+		// 这两条断言是本次修复的核心——客户端一旦退回"发空值/发没配的标识"
+		// 的旧写法，这里必须炸。
+		if v := strings.TrimSpace(r.URL.Query().Get("save_path")); v == "" {
+			upstreamWriteJSON(w, http.StatusOK, map[string]any{
+				"code": 1, "message": "保存目录不能为空",
+			})
+			return
+		}
+		if id := strings.TrimSpace(r.URL.Query().Get("downloader")); !isKnownDownloader(id) {
+			upstreamWriteJSON(w, http.StatusOK, map[string]any{
+				"code": 1, "message": "未找到下载器: Downloader." + id,
+			})
+			return
 		}
 		upstreamWriteJSON(w, http.StatusOK, map[string]any{
 			"code": 0, "message": "已提交到下载器", "data": map[string]any{},
@@ -151,11 +168,12 @@ func newStrictUpstream(t *testing.T) (*httptest.Server, *strictUpstream) {
 }
 
 // TestStrictUpstreamReproduces422 先证明这个假上游是"忠实的"：
-// 缺 save_path 真的会 422。否则后面的测试可能因为假上游太宽松而形同虚设。
+// 少任何一个必填参数都真的会 422，空值也真的会被拒。
+// 否则后面的测试可能因为假上游太宽松而形同虚设。
 func TestStrictUpstreamReproduces422(t *testing.T) {
 	server, _ := newStrictUpstream(t)
 
-	get := func(query string) int {
+	get := func(query string) (int, string) {
 		req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/articles/download/manul?"+query, nil)
 		if err != nil {
 			t.Fatalf("构造请求失败: %v", err)
@@ -166,28 +184,47 @@ func TestStrictUpstreamReproduces422(t *testing.T) {
 			t.Fatalf("请求假上游失败: %v", err)
 		}
 		defer resp.Body.Close()
-		_, _ = io.Copy(io.Discard, resp.Body)
-		return resp.StatusCode
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
 	}
 
-	if got := get("tid=3691410"); got != http.StatusUnprocessableEntity {
-		t.Fatalf("只传 tid 应复现 422，实际 %d（假上游不够严格，本组测试失去意义）", got)
+	cases := []struct {
+		name     string
+		query    string
+		wantCode int
+		wantBody string
+	}{
+		{"只传 tid", "tid=3691410", http.StatusUnprocessableEntity, "downloader"},
+		{"缺 downloader", "tid=3691410&save_path=/x", http.StatusUnprocessableEntity, "downloader"},
+		{"缺 save_path", "tid=3691410&downloader=clouddrive", http.StatusUnprocessableEntity, "save_path"},
+		{"downloader 传空串", "tid=3691410&downloader=&save_path=/x", http.StatusOK, "未找到下载器"},
+		{"save_path 传空串", "tid=3691410&downloader=clouddrive&save_path=", http.StatusOK, "保存目录不能为空"},
+		{"downloader 不认识", "tid=3691410&downloader=bogus&save_path=/x", http.StatusOK, "未找到下载器"},
+		{"参数齐全且合法", "tid=3691410&downloader=clouddrive&save_path=/x", http.StatusOK, "已提交到下载器"},
 	}
-	if got := get("tid=3691410&downloader=115"); got != http.StatusUnprocessableEntity {
-		t.Fatalf("缺 save_path 应复现 422，实际 %d", got)
-	}
-	if got := get("tid=3691410&downloader=&save_path="); got != http.StatusOK {
-		t.Fatalf("参数齐全（值为空）应 200，实际 %d", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			code, body := get(tc.query)
+			if code != tc.wantCode {
+				t.Fatalf("状态码 = %d, 期望 %d；body=%s", code, tc.wantCode, body)
+			}
+			if tc.wantBody != "" && !strings.Contains(body, tc.wantBody) {
+				t.Errorf("响应应包含 %q，实际 %s", tc.wantBody, body)
+			}
+		})
 	}
 }
 
-// TestEndToEndDownloadAgainstStrictUpstream 是本次修复的端到端验收：
-// 用"什么都没填"的配置（最常见的部署形态）走完整链路，
-// 必须成功，且**不能**把 downloader 以空值形式发给上游。
+// TestEndToEndDownloadAgainstStrictUpstream 是端到端验收：
+// 用"没填下载器、只填了保存路径"的配置走完整链路，必须成功。
+//
+// 这两种留空的处理**刻意不同**，因为上游对它们的容忍度不同：
+//   - downloader 留空 → 用兜底标识填上（上游把参数改成必填了，没得选）；
+//   - save_path 留空 → 直接拒绝提交（上游不接受空值，我们也猜不出该往哪存）。
+//     这条路径由 TestDownloadRequiresConfiguredSavePath 覆盖。
 func TestEndToEndDownloadAgainstStrictUpstream(t *testing.T) {
 	server, up := newStrictUpstream(t)
 
-	// 刻意不配置 Downloader / SavePath —— 这正是触发线上 422 的场景。
 	app := NewApp(Config{
 		APIBaseURL: server.URL,
 		APIKey:     "e2e-key",
@@ -195,7 +232,9 @@ func TestEndToEndDownloadAgainstStrictUpstream(t *testing.T) {
 		Timeout:    5 * time.Second,
 		TimeoutSec: 5,
 		MaxResults: 100,
-		ConfigDir:  t.TempDir(),
+		// 只配保存路径，下载器留空——最常见的部署形态。
+		SavePath:  "/media/movies",
+		ConfigDir: t.TempDir(),
 	}, discardLogger())
 
 	req := httptest.NewRequest(http.MethodPost, "/download", strings.NewReader("tid=3691410"))
@@ -216,7 +255,7 @@ func TestEndToEndDownloadAgainstStrictUpstream(t *testing.T) {
 		t.Fatalf("提交下载应成功，实际 message=%q", resp.Message)
 	}
 
-	// 上游侧必须收到必填参数——这是 422 不再复发的直接证据。
+	// 上游侧必须收到全部必填参数——这是 422 不再复发的直接证据。
 	got := up.last(t)
 	if got.Path != "/api/v1/articles/download/manul" {
 		t.Errorf("上游路径 = %q", got.Path)
@@ -233,20 +272,16 @@ func TestEndToEndDownloadAgainstStrictUpstream(t *testing.T) {
 		t.Errorf("tid = %q", got.Query.Get("tid"))
 	}
 
-	// 本次修复的核心断言：没配下载器时，这个参数必须**整个不存在**。
+	// 核心断言：没配下载器时也不能发空值——必须换成兜底标识。
 	//
-	// 不能用 Get() == "" 来判断——那对"没有该键"和"键存在但值为空"是一样的，
-	// 而这两种情形在上游眼里天差地别：前者继承全局下载器，后者会去查一个
-	// 名叫"空"的下载器然后报 `未找到下载器`。假上游已经复刻了这个行为，
-	// 所以只要客户端退化成发空串，这里就会失败。
-	if values, present := got.Query["downloader"]; present {
-		t.Errorf("未配置下载器时不应发送 downloader 参数，实际发了 %q（上游会回『未找到下载器』）", values)
+	// 空串会被上游解读成"找一个叫空的下载器"，回一句 `未找到下载器`；
+	// 缺参数则直接 422。两种都是前面踩过的坑，这里一次钉死。
+	// 假上游已经复刻了这个行为，所以只要客户端退化，这里就会失败。
+	if gotID := got.Query.Get("downloader"); gotID != fallbackDownloaderID {
+		t.Errorf("未配置下载器时应发送兜底标识 %q，实际 %q", fallbackDownloaderID, gotID)
 	}
-	// save_path 不同：留空是合法的，但必须**发送**（上游判它必填，空值也发）。
-	if values, present := got.Query["save_path"]; !present {
-		t.Error("save_path 必须发送（上游判为必填），即使值为空")
-	} else if values[0] != "" {
-		t.Errorf("未配置保存路径时应传空值，实际 %q", values[0])
+	if got.Query.Get("save_path") != "/media/movies" {
+		t.Errorf("save_path 未透传: %q", got.Query.Get("save_path"))
 	}
 	if got.APIKey != "e2e-key" {
 		t.Errorf("上游未收到 X-API-Key，实际 %q", got.APIKey)
@@ -261,7 +296,7 @@ func TestEndToEndDownloadPassesConfiguredValues(t *testing.T) {
 	app := NewApp(Config{
 		APIBaseURL: server.URL,
 		APIKey:     "e2e-key",
-		Downloader: "my-downloader",
+		Downloader: "qbittorrent",
 		SavePath:   "/media/movies",
 		Addr:       ":0",
 		Timeout:    5 * time.Second,
@@ -281,7 +316,7 @@ func TestEndToEndDownloadPassesConfiguredValues(t *testing.T) {
 	}
 
 	got := up.last(t)
-	if got.Query.Get("downloader") != "my-downloader" {
+	if got.Query.Get("downloader") != "qbittorrent" {
 		t.Errorf("downloader 未透传: %q", got.Query.Get("downloader"))
 	}
 	if got.Query.Get("save_path") != "/media/movies" {

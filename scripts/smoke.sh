@@ -92,8 +92,14 @@ check "GET /settings" "$(status_of "$BASE_URL/settings")" "200"
 contains "设置页含上游地址字段"   "$settings" 'name="api_base_url"'
 contains "设置页含 API Key 字段"  "$settings" 'name="api_key"'
 contains "设置页含下载器字段"     "$settings" 'name="default_downloader"'
+contains "设置页含保存路径字段"   "$settings" 'name="default_save_path"'
+contains "设置页含每页条数字段"   "$settings" 'name="page_size"'
 contains "设置页含访问口令字段"   "$settings" 'name="access_token"'
 contains "设置页含测试连接按钮"   "$settings" 'id="btn-test"'
+contains "设置页含探测下载器按钮" "$settings" 'id="btn-probe-downloaders"'
+# 已下线的两个高级项不得再出现在页面上
+missing  "设置页已下线请求超时项" "$settings" 'name="timeout_seconds"'
+missing  "设置页已下线结果上限项" "$settings" 'name="max_results"'
 # 只断言文件名，不断言分隔符：Windows 上是 \config.json，Linux 上是 /config.json
 contains "设置页显示配置文件路径" "$settings" 'config.json'
 
@@ -112,10 +118,22 @@ else
   # 产品要求：只显示文字列表，不加载海报图
   missing  "结果页不含任何图片" "$search_page" '<img'
   contains "结果页含筛选工具条" "$search_page" 'class="toolbar"'
+  # 需求：结果行带序号、支持多选与批量操作
+  contains "结果行带序号"       "$search_page" 'class="row-index"'
+  contains "结果行带选择框"     "$search_page" 'class="row-check"'
+  contains "结果页含批量操作条" "$search_page" 'id="batchbar"'
+  contains "结果页含每页条数选择" "$search_page" 'name="page_size"'
+  # 需求：这些字样不得再出现在页面上
+  missing  "结果页不含「免费」字样" "$search_page" '免费'
+  missing  "结果页不含「做种」字样" "$search_page" '做种'
+  missing  "结果页不含产品名"     "$search_page" 'Avdb'
 
   api="$(body_of "$BASE_URL/api/search?q=$QUERY")"
   contains "JSON 接口返回 keyword"  "$api" '"keyword"'
   contains "JSON 接口返回 torrents" "$api" '"torrents"'
+  contains "JSON 接口返回总命中数"  "$api" '"total"'
+  contains "JSON 接口返回总页数"    "$api" '"total_pages"'
+  contains "JSON 接口返回每页条数"  "$api" '"page_size"'
 
   count="$(printf '%s' "$api" | sed -n 's/.*"count":\([0-9]*\).*/\1/p' | head -1)"
   if [ -n "$count" ] && [ "$count" -gt 0 ] 2>/dev/null; then
@@ -202,6 +220,27 @@ dl_csrf="$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
     -H "Content-Type: application/x-www-form-urlencoded" \
     --data 'tid=1' "$BASE_URL/download")"
 check "跨站 POST /download 应 403" "$dl_csrf" "403"
+
+# 批量下载：同样只验证"进入上游之前就被拒"的路径
+dl_batch_empty="$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
+    -X POST -H "X-Auth-Token: $TOKEN" -H "Origin: $BASE_URL" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data 'tids=' "$BASE_URL/download/batch")"
+check "POST /download/batch 空 tids 应 400" "$dl_batch_empty" "400"
+
+dl_batch_csrf="$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
+    -X POST -H "X-Auth-Token: $TOKEN" -H "Origin: http://evil.example.com" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data 'tids=1,2' "$BASE_URL/download/batch")"
+check "跨站 POST /download/batch 应 403" "$dl_batch_csrf" "403"
+
+# 单批上限 100：给 101 个合法 tid 应被拒，且这一步发生在解析下载目标之前，不会触达上游
+oversize="$(seq 1 101 | tr '\n' ',' | sed 's/,$//')"
+dl_batch_over="$(curl -s --max-time 30 -o /dev/null -w '%{http_code}' \
+    -X POST -H "X-Auth-Token: $TOKEN" -H "Origin: $BASE_URL" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data "tids=$oversize" "$BASE_URL/download/batch")"
+check "POST /download/batch 超 100 条应 400" "$dl_batch_over" "400"
 
 # ---------------------------------------------------------------- 汇总
 printf '\n\033[1m结果\033[0m：\033[32m%d 通过\033[0m' "$pass"

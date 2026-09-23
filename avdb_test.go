@@ -527,19 +527,25 @@ func TestDescribeStatusPrefersHumanReadable422(t *testing.T) {
 //
 // 这三个参数看起来是一组，实际上有三种不同语义，项目在它们上面踩过三次坑：
 //
+// TestSubmitDownloadAlwaysSendsAllQueryParams 守住下载接口的三个参数。
+//
+// 这三个参数的语义被上游改过，本站也随之连踩三次坑，因此这里把
+// **当前实测行为**固化成不变量：
+//
 //	tid        必填，永远发送；
-//	save_path  必填，**空值也要发送**（漏发直接 422，这是第一次线上报错）；
-//	downloader 选填，空值时**必须整个参数不出现**。
+//	downloader 必填。上游 openapi 标着 `required: true`，缺它直接返回
+//	           422（`loc:["query","downloader"]`）。早期版本它是选填、
+//	           留空即继承上游全局默认值，那条路现在已被上游关掉。
+//	save_path  必填。缺了 422，传空串则回「保存目录不能为空」——
+//	           即"空值"不是一个可接受的取值。
 //
-// 最后一列最反直觉：把"留空"实现成"发空串"会被上游解读为
-// "去找一个 id 为空的下载器"，回一句 `未找到下载器`（第二次线上报错）；
-// 而猜一个具体值（曾经硬编码 115）同样会被拒（第三次线上报错
-// `未找到下载器: Downloader.115`）。只有省略参数，上游才会用它的全局默认值。
+// 所以本层只保证"三个参数一定都发出去"，空值的**拦截责任**在上层：
+// Config.resolveDownloadTarget 会在提交前拒绝空保存目录并给出可操作提示，
+// 而不是把一句英文校验错误甩给用户。
 //
-// 断言刻意用 `q[key]` 而不是 `q.Get(key)` 判断存在性：
-// Get 对"没有该键"和"键存在但值为空"返回同样的空串，而这两者在上游眼里
-// 天差地别。用错方法这条测试就守不住任何东西。
-func TestSubmitDownloadQueryParamSemantics(t *testing.T) {
+// 断言刻意用 `q[key]` 而不是 `q.Get(key)` 判断存在性：Get 对"没有该键"和
+// "键存在但值为空"返回同样的空串，而这两者在上游眼里天差地别。
+func TestSubmitDownloadAlwaysSendsAllQueryParams(t *testing.T) {
 	var gotURI string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotURI = r.URL.RequestURI()
@@ -553,13 +559,14 @@ func TestSubmitDownloadQueryParamSemantics(t *testing.T) {
 	cases := []struct {
 		name                 string
 		downloader, savePath string
-		wantDownloaderSent   bool
+		wantDownloader       string
+		wantSavePath         string
 	}{
-		{"两者都空（最常见）", "", "", false},
-		{"只配下载器", "115", "", true},
-		{"只配保存路径", "", "/media/movies", false},
-		{"下载器是纯空白", "   ", "", false},
-		{"两者都配", "qb", "/downloads/tv", true},
+		{"两者都空", "", "", "", ""},
+		{"只配下载器", "clouddrive", "", "clouddrive", ""},
+		{"只配保存路径", "", "/media/movies", "", "/media/movies"},
+		{"下载器是纯空白", "   ", "", "", ""},
+		{"两者都配", "qbittorrent", "/downloads/tv", "qbittorrent", "/downloads/tv"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -575,20 +582,16 @@ func TestSubmitDownloadQueryParamSemantics(t *testing.T) {
 			if q.Get("tid") != "3691410" {
 				t.Errorf("tid 不正确: %q", q.Get("tid"))
 			}
-			// save_path 永远发送，空值也发。
-			if _, ok := q["save_path"]; !ok {
-				t.Errorf("save_path 必须发送（缺了会 422），实际 URI: %s", gotURI)
-			} else if q.Get("save_path") != strings.TrimSpace(tc.savePath) {
-				t.Errorf("save_path = %q，期望 %q", q.Get("save_path"), tc.savePath)
+			for _, key := range []string{"tid", "downloader", "save_path"} {
+				if _, ok := q[key]; !ok {
+					t.Errorf("缺少必填参数 %s（上游会直接 422），实际 URI: %s", key, gotURI)
+				}
 			}
-			// downloader 有值才发送。
-			values, present := q["downloader"]
-			if present != tc.wantDownloaderSent {
-				t.Fatalf("downloader 是否应发送 = %v，实际 %v（URI: %s）",
-					tc.wantDownloaderSent, present, gotURI)
+			if got := q.Get("downloader"); got != tc.wantDownloader {
+				t.Errorf("downloader = %q，期望 %q", got, tc.wantDownloader)
 			}
-			if present && values[0] != strings.TrimSpace(tc.downloader) {
-				t.Errorf("downloader = %q，期望 %q", values[0], tc.downloader)
+			if got := q.Get("save_path"); got != tc.wantSavePath {
+				t.Errorf("save_path = %q，期望 %q", got, tc.wantSavePath)
 			}
 		})
 	}

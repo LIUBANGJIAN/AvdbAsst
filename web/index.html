@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
 <meta name="referrer" content="same-origin">
-<title>{{if .Keyword}}{{.Keyword}} · {{end}}Avdb 搜索</title>
+<title>{{if .Keyword}}{{.Keyword}} · {{end}}{{siteName}}</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="search" type="application/opensearchdescription+xml" title="Avdb 搜索" href="/opensearch.xml">
+<link rel="search" type="application/opensearchdescription+xml" title="{{siteName}}" href="/opensearch.xml">
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
@@ -19,11 +19,13 @@
         <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.4"/>
         <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
       </svg>
-      <span>Avdb</span>
+      <span>{{siteName}}</span>
     </a>
 
     <form class="search" action="/s" method="get" role="search">
-      <input type="search" name="q" id="q" value="{{.Keyword}}" placeholder="输入番号、标题或关键词…" autocomplete="off" spellcheck="false" autofocus aria-label="搜索关键词">
+      {{/* autofocus 只在首屏给：结果页再抢焦点会让浏览器把页面滚回顶部，
+          用户刚翻到第 2 页就"跳"一下，正是要避免的那种抖动。 */}}
+      <input type="search" name="q" id="q" value="{{.Keyword}}" placeholder="输入番号、标题或关键词…" autocomplete="off" spellcheck="false"{{if not .Keyword}} autofocus{{end}} aria-label="搜索关键词">
       <button type="submit">搜索</button>
     </form>
 
@@ -31,11 +33,11 @@
       <a class="is-active" href="/">搜索</a>
       <a href="/settings">设置</a>
     </nav>
-    <span class="ver-badge" title="当前运行的版本">{{.Version}}</span>
+    <span class="ver-badge" title="当前版本 {{.Version}}{{if .Build}}（构建 {{.Build}}）{{end}}">{{.Version}}</span>
   </div>
 </header>
 
-<main class="wrap{{if and (not .Error) (not .Keyword)}} wrap-center{{end}}">
+<main class="wrap">
 
   {{if .Error}}
     <div class="alert alert-err" role="alert">
@@ -52,13 +54,13 @@
           <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
         </svg>
       </div>
-      <h1>Avdb 资源搜索</h1>
+      <h1>资源搜索</h1>
       <p>输入番号、标题或关键词开始检索。</p>
 
       {{if .NeedSetup}}
         <div class="alert alert-warn" role="status">
           <strong>还没配置上游服务</strong>
-          <span>请先前往 <a href="/settings">设置</a> 填写 Avdb 地址与 API Key，否则搜索会返回 401。</span>
+          <span>请先前往 <a href="/settings">设置</a> 填写上游地址与 API Key，否则搜索会返回 401。</span>
         </div>
       {{end}}
     </section>
@@ -108,7 +110,6 @@
         <label for="f-sort">排序</label>
         <select id="f-sort">
           <option value="default">默认</option>
-          <option value="seeders">做种最多</option>
           <option value="size-desc">体积从大到小</option>
           <option value="size-asc">体积从小到大</option>
           <option value="time-desc">最新发布</option>
@@ -121,16 +122,41 @@
         <button type="button" class="chip" data-flag="unc" aria-pressed="false">无码</button>
         <button type="button" class="chip" data-flag="uhd" aria-pressed="false">4K</button>
         <button type="button" class="chip" data-flag="hd" aria-pressed="false">高清</button>
-        <button type="button" class="chip" data-flag="free" aria-pressed="false">免费</button>
       </div>
+
+      {{/* 每页条数：选择即生效并**永久保存**（服务端落盘），不是一次性参数。
+          所以这个表单只带 q，不带 page——翻页位置没有保留的意义。 */}}
+      <form class="field page-size-form" method="get" action="/s">
+        <label for="page_size">每页</label>
+        <input type="hidden" name="q" value="{{.Keyword}}">
+        <select id="page_size" name="page_size">
+          {{$current := .PageSize}}
+          {{range .PageSizeOptions}}<option value="{{.Value}}"{{if eq .Value $current}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+        <noscript><button type="submit" class="btn btn-ghost">应用</button></noscript>
+      </form>
 
       <button type="button" class="btn btn-ghost" id="f-reset">重置</button>
     </section>
 
     <p class="stats">
-      共 <strong id="result-count">{{len .Torrents}}</strong> 条
-      {{if .Truncated}}<span class="stats-warn">（结果过多，仅显示前 {{len .Torrents}} 条）</span>{{end}}
+      {{if .Paged}}第 {{.Page}} / {{.TotalPages}} 页 · {{end}}共 <strong>{{.Total}}</strong> 条 · 本页 <strong id="result-count">{{len .Torrents}}</strong> 条
+      {{if .Truncated}}<span class="stats-warn">（结果过多，只展示前 {{.Total}} 条）</span>{{end}}
     </p>
+
+    {{/* 批量操作条：固定在视口底部，选中任何一项后才出现。
+        用 position: sticky 而不是在文档流里插一段，是为了不引入任何布局位移——
+        上半页跳动的问题已经够多了，不能自己再制造一个。 */}}
+    <div class="batchbar" id="batchbar" hidden>
+      <label class="batch-all">
+        <input type="checkbox" id="check-all"> 全选本页
+      </label>
+      <span class="batch-count">已选 <strong id="sel-count">0</strong> 项</span>
+      <button type="button" class="btn btn-primary" id="batch-download">批量下载</button>
+      <button type="button" class="btn btn-ghost" id="batch-copy">复制磁链</button>
+      <button type="button" class="btn btn-ghost" id="batch-clear">清空选择</button>
+      <span class="batch-status" id="batch-status" role="status" aria-live="polite"></span>
+    </div>
 
     {{/* 列表展示：只保留可扫读的文字信息，不加载任何海报图 */}}
     <ul class="results" id="results">
@@ -142,8 +168,16 @@
           data-category="{{$t.Category}}"
           data-flags="{{flags $t}}"
           data-size="{{$t.SizeMB}}"
-          data-seeders="{{$t.Seeders}}"
-          data-ts="{{$t.SortTS}}">
+          data-ts="{{$t.SortTS}}"
+          data-tid="{{$t.ID}}">
+
+          <div class="row-pick">
+            <input type="checkbox" class="row-check" value="{{$t.ID}}"
+                   {{if $t.DownloadURL}}data-magnet="{{$t.DownloadURL}}"{{end}}
+                   aria-label="选择第 {{add $.StartedAt $i}} 条">
+          </div>
+
+          <div class="row-index" aria-hidden="true">{{add $.StartedAt $i}}</div>
 
           <div class="row-main">
             <h2 class="row-title"{{if $t.Title}} title="{{$t.Title}}"{{end}}>{{$t.Title}}</h2>
@@ -152,8 +186,7 @@
               <span class="site">{{dash $t.Site}}</span>
               {{if $t.Section}}<span class="sep">/</span><span>{{$t.Section}}</span>{{end}}
               {{if $t.Category}}<span class="sep">/</span><span>{{$t.Category}}</span>{{end}}
-              {{if gt $t.Seeders 0}}<span class="sep">/</span><span>做种 {{$t.Seeders}}</span>{{end}}
-              {{if $t.PostTime}}<span class="sep">/</span><span{{if $t.PostTime}} title="{{$t.PostTime}}"{{end}}>{{formatDate $t.PostTime}}</span>{{end}}
+              {{if $t.PostTime}}<span class="sep">/</span><span title="{{$t.PostTime}}">{{formatDate $t.PostTime}}</span>{{end}}
             </div>
 
             <div class="row-tags">
@@ -161,7 +194,6 @@
               {{if $t.Uncensored}}<span class="tag t-unc">无码</span>{{end}}
               {{if $t.UHD}}<span class="tag t-uhd">4K</span>{{end}}
               {{if $t.HD}}<span class="tag t-hd">高清</span>{{end}}
-              {{if $t.Free}}<span class="tag t-free">免费</span>{{end}}
             </div>
           </div>
 
@@ -178,6 +210,32 @@
         </li>
       {{end}}
     </ul>
+
+    {{if .Paged}}
+      <nav class="pager" aria-label="分页导航">
+        {{if .PrevURL}}<a class="pager-btn" href="{{.PrevURL}}" rel="prev">上一页</a>
+        {{else}}<span class="pager-btn is-disabled">上一页</span>{{end}}
+
+        {{if .FirstURL}}<a class="pager-num" href="{{.FirstURL}}">1</a><span class="pager-gap">…</span>{{end}}
+
+        {{range .PageLinks}}
+          {{if .Current}}<span class="pager-num is-current" aria-current="page">{{.Number}}</span>
+          {{else}}<a class="pager-num" href="{{.URL}}">{{.Number}}</a>{{end}}
+        {{end}}
+
+        {{if .LastURL}}<span class="pager-gap">…</span><a class="pager-num" href="{{.LastURL}}">{{.TotalPages}}</a>{{end}}
+
+        {{if .NextURL}}<a class="pager-btn" href="{{.NextURL}}" rel="next">下一页</a>
+        {{else}}<span class="pager-btn is-disabled">下一页</span>{{end}}
+
+        <form class="pager-jump" method="get" action="/s">
+          <input type="hidden" name="q" value="{{.Keyword}}">
+          <label for="page-jump">跳到</label>
+          <input type="number" id="page-jump" name="page" min="1" max="{{.TotalPages}}" value="{{.Page}}" inputmode="numeric">
+          <button type="submit" class="btn btn-ghost">跳转</button>
+        </form>
+      </nav>
+    {{end}}
 
     <div class="empty" id="no-match" hidden>
       <h2>当前筛选条件下没有结果</h2>

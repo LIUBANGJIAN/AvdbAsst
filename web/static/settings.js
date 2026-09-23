@@ -1,9 +1,10 @@
 /* =========================================================================
-   Avdb 搜索 · 设置页交互
-   三件事，彼此独立，任一失败不影响其余：
+   资源搜索 · 设置页交互
+   四件事，彼此独立，任一失败不影响其余：
      1. 测试连接：保存前先探一次"地址 + 令牌"能不能用；
-     2. 读上游默认下载器：把上游配好的下载器 + 目录取回来填进输入框；
-     3. 校验下载器：用 API Key 问上游"这个标识存在吗、它下面有哪些目录"。
+     2. 探测可用下载器：问上游"你到底配了哪个下载器"，返回可用的标识；
+     3. 读上游默认下载器：把上游配好的下载器 + 目录取回来填进输入框；
+     4. 校验下载器：用 API Key 问上游"这个标识存在吗、它下面有哪些目录"。
 
    全部只用访问令牌，不需要上游账号密码。
 
@@ -53,13 +54,12 @@
     }).then(function (response) { return response.json(); });
   }
 
-  // 探测接口都吃同一组"上游地址 + 令牌 + 超时"，统一构造。
+  // 探测接口都吃同一组"上游地址 + 令牌"，统一构造。
   // api_key 留空时服务端会沿用已保存的那个，用户不必为了测试重粘令牌。
   function basePayload() {
     var payload = new URLSearchParams();
     payload.set('api_base_url', valueOf('api_base_url'));
     payload.set('api_key', valueOf('api_key'));
-    payload.set('timeout_seconds', valueOf('timeout_seconds'));
     return payload;
   }
 
@@ -102,10 +102,43 @@
     });
   }
 
-  /* ------------------------------------------------- 2. 读上游默认下载器 */
+  var ruleResult = document.getElementById('downloader-result');
+
+  /* -------------------------------------------------- 2. 探测可用下载器 */
+
+  var probeButton = document.getElementById('btn-probe-downloaders');
+
+  if (probeButton && ruleResult) {
+    probeButton.addEventListener('click', function () {
+      probeButton.disabled = true;
+      setResult(ruleResult, 'loading', '正在探测上游配置了哪些下载器…');
+
+      postJSON('/api/settings/downloaders', basePayload())
+        .then(function (data) {
+          if (!data) {
+            setResult(ruleResult, 'err', '探测失败');
+            return;
+          }
+          if (data.downloaders) {
+            fillDatalist('downloader-options', data.downloaders.map(function (p) { return p.id; }));
+          }
+          // 探测到可用标识才回填：没探测到时把字段清空是错误的，
+          // 用户可能已经手填了一个自认为可用的值。
+          setValue('default_downloader', data.best);
+          fillDatalist('save-path-options', data.directories);
+          setResult(ruleResult, data.success ? 'ok' : 'err',
+            data.message || (data.success ? '探测完成' : '探测失败'));
+        })
+        .catch(function () {
+          setResult(ruleResult, 'err', '请求失败，请检查网络或访问口令');
+        })
+        .then(function () { probeButton.disabled = false; });
+    });
+  }
+
+  /* ------------------------------------------------- 3. 读上游默认下载器 */
 
   var ruleButton = document.getElementById('btn-default-rule');
-  var ruleResult = document.getElementById('downloader-result');
 
   if (ruleButton && ruleResult) {
     ruleButton.addEventListener('click', function () {
@@ -133,7 +166,7 @@
     });
   }
 
-  /* ------------------------------------------------------ 3. 校验下载器 */
+  /* ------------------------------------------------------ 4. 校验下载器 */
 
   var checkButton = document.getElementById('btn-check-downloader');
 

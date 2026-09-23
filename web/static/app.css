@@ -72,7 +72,15 @@
 /* ------------------------------------------------------------------ 基础 */
 *, *::before, *::after { box-sizing: border-box; }
 
-html { -webkit-text-size-adjust: 100%; }
+html {
+  -webkit-text-size-adjust: 100%;
+  /* 预留滚动条槽位。
+   *
+   * 这是"跳转时页面上方会跳动"的头号原因：首页内容短、没有滚动条，
+   * 结果页很长、有滚动条，两者相差约 15px 的可用宽度，页面一换整块内容
+   * 就横向挪一下。预留槽位之后两页宽度一致，切换时不再位移。 */
+  scrollbar-gutter: stable;
+}
 
 body {
   margin: 0;
@@ -125,6 +133,9 @@ code {
   display: flex;
   align-items: center;
   gap: var(--sp-5);
+  /* 固定高度下限：设置页没有搜索框、结果页有，两页若各按内容撑高，
+   * 顶部栏会一个高一个矮，切换时下方内容整体上下跳。 */
+  min-height: 64px;
 }
 
 .brand {
@@ -234,13 +245,6 @@ code {
   flex: 1 0 auto;
 }
 .wrap-narrow { max-width: 860px; }
-/* 首页没有结果可展示时，把空态垂直居中，避免正文区留一大片死白 */
-.wrap-center {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-}
 
 /* ------------------------------------------------------------------ 按钮 */
 .btn {
@@ -303,6 +307,10 @@ code {
 .hero {
   text-align: center;
   max-width: 560px;
+  /* 水平居中靠自身外边距，不靠父容器的居中布局：
+   * 父容器一旦改成 flex 居中，换页时正文起点会从顶部变到中间，
+   * 页面看起来就"跳"了一下。 */
+  margin: 0 auto;
   padding: var(--sp-5) 0;
 }
 .hero-mark {
@@ -407,22 +415,23 @@ code {
 
 /* 结果行布局。
  *
- * 状态消息**刻意不放在操作列里**，而是独占第三行的整幅宽度。
- * 原因是上游的报错原文可以很长（"未找到下载器……请到设置页……上游原文：……"），
- * 塞进 auto 宽度的操作列会把该列撑得很宽，反过来把 minmax(0,1fr) 的主列挤到
- * 只剩一两个字符宽——整行的站点名、板块、做种数会变成竖排的单字。
+ * 五列：选择框 / 序号 / 正文 / 体积 / 操作，状态消息独占第二行整幅宽度。
+ *
+ * 状态消息**刻意不放在操作列里**：上游的报错原文可以很长（"未找到下载器……
+ * 请到设置页……上游原文：……"），塞进 auto 宽度的操作列会把该列撑得很宽，
+ * 反过来把 minmax(0,1fr) 的主列挤到只剩一两个字符宽，整行的站点名会变成竖排。
  * 让消息独占一行，主列宽度就与消息长度无关了。 */
 .row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 100px auto;
+  grid-template-columns: auto 42px minmax(0, 1fr) 100px auto;
   grid-template-areas:
-    "main size actions"
-    "status status status";
+    "pick idx main size actions"
+    "status status status status status";
   align-items: center;
   /* 行间距刻意用 0：grid 的 row-gap 在"状态行为空"时依然会留出空隙，
    * 那样每一行都会平白多出十几像素的底部空白。
    * 间距改由 .status 自己的 margin-top 提供，它一 hide 就自然归零。 */
-  gap: 0 var(--sp-5);
+  gap: 0 var(--sp-4);
   padding: 14px 18px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -432,6 +441,27 @@ code {
 }
 .row:hover { box-shadow: var(--sh-2); border-color: var(--border-strong); }
 .row[hidden] { display: none; }
+.row.is-picked { border-color: var(--accent); background: #fbfcff; }
+
+.row-pick { grid-area: pick; display: flex; align-items: center; }
+.row-pick input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* 序号：跨页连续（第 2 页从 101 开始），用等宽数字对齐 */
+.row-index {
+  grid-area: idx;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
 
 .row-main { grid-area: main; min-width: 0; }
 
@@ -478,7 +508,6 @@ code {
 .tag.t-unc  { background: #fdf0e6; color: #96551a; }
 .tag.t-uhd  { background: #efe9fd; color: #5b3bb5; }
 .tag.t-hd   { background: #e8f1fd; color: #1e5aa8; }
-.tag.t-free { background: #fdecf2; color: #a8335f; }
 
 .row-size { grid-area: size; text-align: right; }
 .row-size .size {
@@ -511,6 +540,107 @@ code {
 .status.is-ok      { color: var(--ok); }
 .status.is-err     { color: var(--danger); }
 .status.is-loading { color: var(--text-muted); }
+
+/* -------------------------------------------------------------- 批量操作 */
+/* 固定在视口底部。用 sticky 而不是 fixed，是为了在滚到列表末尾时不遮住
+ * 最后一行——它最终会回到文档流里的位置。 */
+.batchbar {
+  position: sticky;
+  bottom: 12px;
+  z-index: 15;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0 0;
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, .96);
+  backdrop-filter: saturate(1.6) blur(8px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-3);
+}
+.batchbar[hidden] { display: none; }
+.batch-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.batch-all input { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.batch-count { font-size: 14px; color: var(--text); white-space: nowrap; }
+.batch-count strong { font-variant-numeric: tabular-nums; }
+.batch-status { flex: 1 1 220px; min-width: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.batch-status.is-ok      { color: var(--ok); }
+.batch-status.is-err     { color: var(--danger); }
+.batch-status.is-loading { color: var(--text-muted); }
+
+/* ---------------------------------------------------------------- 分页 */
+.pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: var(--sp-5);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-1);
+}
+.pager-btn,
+.pager-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 13.5px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+}
+.pager-btn:hover, .pager-num:hover {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  text-decoration: none;
+}
+.pager-num { font-variant-numeric: tabular-nums; }
+.pager-num.is-current {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.pager-btn.is-disabled { opacity: .5; }
+.pager-gap { padding: 0 2px; color: var(--text-dim); }
+
+.pager-jump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  font-size: 13.5px;
+  color: var(--text-muted);
+}
+.pager-jump input {
+  width: 76px;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13.5px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+}
+
+/* 每页条数：和筛选器同排，用 label 与下拉框而不是按钮，改完即生效 */
+.page-size-form select { min-width: 104px; }
 
 /* ------------------------------------------------------------- 空态 */
 .empty {
@@ -630,9 +760,7 @@ code {
 .kv dt { color: var(--text-muted); font-size: 13.5px; }
 .kv dd { margin: 0; font-size: 13.5px; word-break: break-all; }
 .kv-wide { grid-template-columns: 110px 1fr; }
-
-/* 二次验证码输入区：默认隐藏，由脚本在需要时展开 */
-.is-hidden { display: none !important; }
+.kv-note { margin-left: var(--sp-2); color: var(--text-dim); font-size: 12.5px; }
 
 /* ------------------------------------------------------------------ 吐司 */
 .toast {
@@ -652,23 +780,27 @@ code {
   z-index: 50;
 }
 .toast:not([hidden]) { opacity: 1; transform: translateX(-50%) translateY(0); }
+/* 批量操作条占着底部时，吐司往上让位，否则两层叠在一起谁都看不清 */
+body.has-selection .toast { bottom: 84px; }
 
 /* ------------------------------------------------------------------ 响应式 */
 @media (max-width: 900px) {
-  .topbar-inner { flex-wrap: wrap; gap: var(--sp-3); }
+  .topbar-inner { flex-wrap: wrap; gap: var(--sp-3); min-height: 0; }
   .search { order: 3; flex-basis: 100%; max-width: none; }
   .row {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: auto 34px minmax(0, 1fr) auto;
     grid-template-areas:
-      "main size"
-      "actions actions"
-      "status status";
+      "pick idx main size"
+      "actions actions actions actions"
+      "status status status status";
   }
   .row-actions {
     justify-content: flex-start;
     /* 窄屏上操作列独占一行，这时才需要它自己带间距（宽屏时它在第一行居中）。 */
     margin-top: var(--sp-3);
   }
+  .batchbar { justify-content: flex-start; }
+  .batch-status { flex-basis: 100%; }
 }
 
 @media (max-width: 640px) {
@@ -708,7 +840,8 @@ code {
 }
 
 @media print {
-  .topbar, .toolbar, .row-actions, .form-actions, .toast { display: none !important; }
+  .topbar, .toolbar, .row-actions, .row-pick, .batchbar, .pager, .form-actions, .toast { display: none !important; }
+  .row { grid-template-columns: 42px minmax(0, 1fr) 100px; grid-template-areas: "idx main size"; }
   body { background: #fff; }
   .row, .panel { box-shadow: none; border-color: #ccc; break-inside: avoid; }
 }

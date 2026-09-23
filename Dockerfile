@@ -12,7 +12,15 @@ FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
 # TARGETOS / TARGETARCH 由 buildx 在跨架构构建时自动注入
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=dev
+
+# VERSION 是**语义化版本号**（页面右上角显示的那个），BUILD 是构建标识
+# （分支@短 sha，只出现在设置页与 /healthz）。
+#
+# 两者都允许为空：留空时保留源码里 `main.version` / `main.build` 的默认值。
+# 这一点很重要——直接 `docker build .` 时不传参，
+# `-X main.version=` 会把版本号覆盖成空串，页面右上角就成了一块空白。
+ARG VERSION=
+ARG BUILD=
 
 WORKDIR /src
 
@@ -22,10 +30,14 @@ RUN go mod download
 
 COPY . .
 
-# CGO_ENABLED=0 产出静态二进制，才能放进最小运行镜像
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
-    -o /out/avdbasst .
+# CGO_ENABLED=0 产出静态二进制，才能放进最小运行镜像。
+# ldflags 按需拼接：只在传了对应 build-arg 时才覆盖源码里的默认值。
+RUN set -eu; \
+    ldflags="-s -w"; \
+    if [ -n "${VERSION}" ]; then ldflags="${ldflags} -X main.version=${VERSION}"; fi; \
+    if [ -n "${BUILD}" ];   then ldflags="${ldflags} -X main.build=${BUILD}"; fi; \
+    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH}" \
+    go build -trimpath -ldflags="${ldflags}" -o /out/avdbasst .
 
 # ------------------------------------------------------------- 运行阶段
 FROM alpine:3.20

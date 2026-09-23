@@ -1,7 +1,7 @@
 /* =========================================================================
-   Avdb 搜索 · 前端交互
+   资源搜索 · 前端交互
    原则：
-     1. 页面内容全部由服务端直出，本脚本只做"增强"，禁用 JS 后完全可用；
+     1. 页面内容全部由服务端直出，本脚本只做"增强"，禁用 JS 后检索仍然可用；
      2. 绝不使用 innerHTML 拼接外部数据（上游标题是不可信输入）；
      3. 不使用内联事件属性，全部走事件委托，以配合严格的 CSP。
    ========================================================================= */
@@ -19,7 +19,7 @@
     toastEl.textContent = message;      // 用 textContent，杜绝注入
     toastEl.hidden = false;
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { toastEl.hidden = true; }, 2000);
+    toastTimer = setTimeout(function () { toastEl.hidden = true; }, 2400);
   }
 
   /* -------------------------------------------------------- 搜索框快捷键 */
@@ -31,6 +31,13 @@
     event.preventDefault();
     if (searchInput) searchInput.focus();
   });
+
+  /* ------------------------------------------------------ 每页条数即时生效 */
+  // 服务端会把选择落盘，所以这里只是"少点一次按钮"。
+  var pageSizeSel = document.getElementById('page_size');
+  if (pageSizeSel && pageSizeSel.form) {
+    pageSizeSel.addEventListener('change', function () { pageSizeSel.form.submit(); });
+  }
 
   /* ---------------------------------------------------------------- 列表 */
 
@@ -46,6 +53,14 @@
   var countEl = document.getElementById('result-count');
   var noMatchEl = document.getElementById('no-match');
   var activeFlags = [];
+
+  var batchBar = document.getElementById('batchbar');
+  var checkAll = document.getElementById('check-all');
+  var selCountEl = document.getElementById('sel-count');
+  var batchStatusEl = document.getElementById('batch-status');
+  var batchDownloadBtn = document.getElementById('batch-download');
+  var batchCopyBtn = document.getElementById('batch-copy');
+  var batchClearBtn = document.getElementById('batch-clear');
 
   function numberAttr(el, name) {
     var value = parseFloat(el.getAttribute('data-' + name));
@@ -71,8 +86,6 @@
     var mode = sortSel.value;
     if (mode === 'default') {
       visible.sort(function (a, b) { return numberAttr(a, 'order') - numberAttr(b, 'order'); });
-    } else if (mode === 'seeders') {
-      visible.sort(function (a, b) { return numberAttr(b, 'seeders') - numberAttr(a, 'seeders'); });
     } else if (mode === 'size-desc') {
       visible.sort(function (a, b) { return numberAttr(b, 'size') - numberAttr(a, 'size'); });
     } else if (mode === 'size-asc') {
@@ -155,6 +168,14 @@
     el.textContent = text || '';
   }
 
+  function statusOf(tid) {
+    return list.querySelector('.status[data-status-for="' + tid + '"]');
+  }
+
+  function rowOf(tid) {
+    return list.querySelector('.row[data-tid="' + tid + '"]');
+  }
+
   function submitDownload(button) {
     var tid = button.getAttribute('data-tid');
     if (!tid) return;
@@ -211,16 +232,20 @@
     return ok;
   }
 
-  function copyMagnet(text) {
-    if (!text) return;
+  function writeClipboard(text, label) {
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text).then(
-        function () { toast('已复制磁力链接'); },
-        function () { toast(legacyCopy(text) ? '已复制磁力链接' : '复制失败，请手动选择'); }
+        function () { toast(label); },
+        function () { toast(legacyCopy(text) ? label : '复制失败，请手动选择'); }
       );
       return;
     }
-    toast(legacyCopy(text) ? '已复制磁力链接' : '复制失败，请手动选择');
+    toast(legacyCopy(text) ? label : '复制失败，请手动选择');
+  }
+
+  function copyMagnet(text) {
+    if (!text) return;
+    writeClipboard(text, '已复制磁力链接');
   }
 
   list.addEventListener('click', function (event) {
@@ -234,6 +259,186 @@
     }
   });
 
-  // 首次渲染后同步一次计数与空态（服务端已给出默认值，这里保持一致）。
+  /* ------------------------------------------------------------ 多选 */
+
+  function checks() {
+    return Array.prototype.slice.call(list.querySelectorAll('.row-check'));
+  }
+
+  function selectedChecks() {
+    return checks().filter(function (box) { return box.checked; });
+  }
+
+  function visibleChecks() {
+    return checks().filter(function (box) {
+      var row = box.closest('.row');
+      return row && !row.hidden;
+    });
+  }
+
+  function syncSelection() {
+    var selected = selectedChecks();
+    var visible = visibleChecks();
+    var visibleSelected = visible.filter(function (box) { return box.checked; }).length;
+
+    if (selCountEl) selCountEl.textContent = String(selected.length);
+    if (batchBar) batchBar.hidden = selected.length === 0;
+    // 提示条占用底部空间，脚部的吐司要跟着让位，否则叠在一起。
+    document.body.classList.toggle('has-selection', selected.length > 0);
+
+    if (checkAll) {
+      checkAll.checked = visible.length > 0 && visibleSelected === visible.length;
+      checkAll.indeterminate = visibleSelected > 0 && visibleSelected < visible.length;
+    }
+  }
+
+  list.addEventListener('change', function (event) {
+    if (!event.target.classList || !event.target.classList.contains('row-check')) return;
+    syncSelection();
+  });
+
+  if (checkAll) {
+    checkAll.addEventListener('change', function () {
+      // 只影响**当前可见**的行：筛选之后全选，用户想选的是他看到的那些。
+      visibleChecks().forEach(function (box) { box.checked = checkAll.checked; });
+      syncSelection();
+    });
+  }
+
+  if (batchClearBtn) {
+    batchClearBtn.addEventListener('click', function () {
+      checks().forEach(function (box) { box.checked = false; });
+      syncSelection();
+    });
+  }
+
+  /* -------------------------------------------------------- 批量下载 */
+
+  // 单批 50 条：服务端一次最多收 100，留一半余量，
+  // 这样进度是按"批"推进的，失败也不会一次牵连太多。
+  var BATCH_SIZE = 50;
+
+  function chunk(values, size) {
+    var out = [];
+    for (var i = 0; i < values.length; i += size) out.push(values.slice(i, i + size));
+    return out;
+  }
+
+  function postBatch(tids) {
+    return fetch('/download/batch', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'
+      },
+      body: 'tids=' + encodeURIComponent(tids.join(',')),
+      credentials: 'same-origin'
+    }).then(function (response) { return response.json(); });
+  }
+
+  function markResult(item) {
+    var statusEl = statusOf(item.tid);
+    if (!statusEl) return;
+    setStatus(statusEl, item.success ? 'ok' : 'err', item.message || (item.success ? '已提交' : '提交失败'));
+  }
+
+  function batchDownload() {
+    var selected = selectedChecks();
+    if (!selected.length) return;
+
+    if (selected.length > 10) {
+      var ok = window.confirm('将向下载器提交 ' + selected.length + ' 条资源，继续吗？');
+      if (!ok) return;
+    }
+
+    var tids = selected.map(function (box) { return box.value; });
+
+    batchDownloadBtn.disabled = true;
+    batchCopyBtn.disabled = true;
+
+    var batches = chunk(tids, BATCH_SIZE);
+    var done = 0, okCount = 0, failCount = 0;
+    var firstErrors = [];
+
+    function step(index) {
+      if (index >= batches.length) {
+        var summary = '提交完成：成功 ' + okCount + ' 条，失败 ' + failCount + ' 条';
+        if (firstErrors.length) summary += '（' + firstErrors[0] + '）';
+        setStatus(batchStatusEl, failCount ? 'err' : 'ok', summary);
+        toast(summary);
+        batchDownloadBtn.disabled = false;
+        batchCopyBtn.disabled = false;
+        return;
+      }
+
+      var batch = batches[index];
+      setStatus(batchStatusEl, 'loading',
+        '正在提交 ' + (done + 1) + '–' + (done + batch.length) + ' / ' + tids.length + ' …');
+
+      postBatch(batch)
+        .then(function (data) {
+          if (data && data.results) {
+            data.results.forEach(function (item) {
+              markResult(item);
+              if (item.success) {
+                okCount++;
+              } else {
+                failCount++;
+                if (firstErrors.length < 3 && item.message) firstErrors.push(item.message);
+              }
+            });
+          } else {
+            // 整批被拒（例如保存路径没配）：把服务端的原话显示出来，不假装成功。
+            failCount += batch.length;
+            if (data && data.message && firstErrors.length < 3) firstErrors.push(data.message);
+            batch.forEach(function (tid) {
+              setStatus(statusOf(tid), 'err', (data && data.message) || '提交失败');
+            });
+          }
+        })
+        .catch(function () {
+          failCount += batch.length;
+          if (firstErrors.length < 3) firstErrors.push('网络错误');
+          batch.forEach(function (tid) { setStatus(statusOf(tid), 'err', '网络错误，请重试'); });
+        })
+        .then(function () {
+          done += batch.length;
+          step(index + 1);
+        });
+    }
+
+    setStatus(batchStatusEl, 'loading', '准备提交 ' + tids.length + ' 条…');
+    step(0);
+  }
+
+  function batchCopy() {
+    var selected = selectedChecks();
+    if (!selected.length) return;
+
+    var links = [];
+    selected.forEach(function (box) {
+      var magnet = box.getAttribute('data-magnet');
+      if (magnet) links.push(magnet);
+    });
+
+    if (!links.length) {
+      setStatus(batchStatusEl, 'err', '选中的条目里没有可复制的磁力链接');
+      return;
+    }
+
+    writeClipboard(links.join('\n'), '已复制 ' + links.length + ' 条磁力链接');
+    if (links.length < selected.length) {
+      setStatus(batchStatusEl, 'ok',
+        '已复制 ' + links.length + ' 条；另有 ' + (selected.length - links.length) + ' 条没有磁链');
+      return;
+    }
+    setStatus(batchStatusEl, 'ok', '已复制 ' + links.length + ' 条磁力链接');
+  }
+
+  if (batchDownloadBtn) batchDownloadBtn.addEventListener('click', batchDownload);
+  if (batchCopyBtn) batchCopyBtn.addEventListener('click', batchCopy);
+
+  // 首次渲染后同步一次计数、选中态与空态（服务端已给出默认值，这里保持一致）。
   apply();
+  syncSelection();
 })();

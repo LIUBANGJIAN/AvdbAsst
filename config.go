@@ -19,9 +19,17 @@ const (
 	// defaultAPIBaseURL 只是占位。真实地址请在部署时通过环境变量或页面配置。
 	defaultAPIBaseURL = "http://127.0.0.1:8999"
 
-	// 上游请求默认超时（秒）与结果条数上限。
+	// 上游请求默认超时（秒）。
 	defaultTimeoutSec = 20
-	defaultMaxResults = 500
+
+	// defaultMaxResults 是**安全阀**，不是"结果上限"：页面上已不再暴露该项。
+	// 上游对宽泛关键词（如 "SSIS"）能一次返回 3000+ 条，这里只拦"异常上游回几十万条"
+	// 这种会把进程内存打满的情况。真正决定"一屏显示多少"的是 PageSize。
+	defaultMaxResults = 5000
+	maxAllowedResults = 50000
+
+	// defaultPageSize 是每页展示条数，可在结果页与设置页调整并持久化。
+	defaultPageSize = 100
 
 	configFileName = "config.json"
 
@@ -46,20 +54,22 @@ type Config struct {
 	APIBaseURL string `json:"api_base_url"`
 	// APIKey 上游鉴权用的 X-API-Key。
 	APIKey string `json:"api_key"`
-	// Downloader 提交离线下载时使用的下载器标识，留空表示**交给上游决定**。
+	// Downloader 提交离线下载时使用的下载器标识。
 	//
-	// 留空的正确实现是「不发送 downloader 这个 query 参数」——上游会继承它的
-	// 全局订阅下载器。注意别写成"发送空串"：上游会把空串当成一个名叫"空"
-	// 的下载器去查，然后回你一句 `未找到下载器`。这是本项目踩过的坑，
-	// 见 avdb.go 的 SubmitDownload。
+	// 上游改版后该参数**已从选填变为必填**：实测 `GET /api/v1/articles/download/manul`
+	// 缺这个参数会直接返回 422（`loc:["query","downloader"]`），
+	// 上游自己的 openapi.json 里它也标着 `required: true`。
+	// 所以"留空 = 让上游用自己的默认下载器"这条老路已经走不通了——
+	// 上游宁可报错，也不会替你选。
 	//
-	// 也不要在代码里猜一个默认标识：猜测的代价是用户拿到一句看不懂的
-	// `未找到下载器: Downloader.<猜测值>`。想要真实值，用
-	// GET /api/v1/javdb/subscriptions/default-rule 向上游要（只需 API Key）。
+	// 留空时的兜底值由 EffectiveDownloader 给出，见那里的说明。
+	// 想要真实值，用 GET /api/v1/javdb/subscriptions/default-rule 向上游要，
+	// 或用设置页的「探测可用下载器」按钮问（两者都只需 API Key）。
 	Downloader string `json:"default_downloader"`
-	// SavePath 提交离线下载时的保存路径，留空表示交给上游决定。
-	// 与 downloader 不同，上游把这个参数判为**必填**（缺失直接 422），
-	// 所以它始终会被发送，空值也发。
+	// SavePath 提交离线下载时的保存路径。
+	//
+	// 它同样是**必填且不能为空**：缺失返回 422，传空串返回「保存目录不能为空」。
+	// 也就是说上游把"用哪个目录"的决定权完全交还给调用方。
 	SavePath string `json:"default_save_path"`
 	// SavePathOptions 是最近一次从上游列出的目录候选，仅供设置页做下拉提示。
 	SavePathOptions []string `json:"save_path_options,omitempty"`
@@ -67,8 +77,13 @@ type Config struct {
 	Addr string `json:"listen_addr"`
 	// TimeoutSec 单次上游请求超时（秒）。
 	TimeoutSec int `json:"timeout_seconds"`
-	// MaxResults 单次搜索最多展示的条目数。
+	// MaxResults 是**安全阀**：单次搜索最多接受的条目数，页面上不暴露。
+	// 语义已经从"结果上限"改成"防止异常上游把内存打满"，默认 5000，正常搜索碰不到。
 	MaxResults int `json:"max_results"`
+	// PageSize 是结果页每页展示的条数，取值见 AllowedPageSizes()。
+	// 0 表示"全部显示"（不分页）。该值由用户在结果页或设置页选择后**持久化**，
+	// 下次打开仍然是这个值——它是偏好，不是单次请求参数。
+	PageSize int `json:"page_size"`
 	// AccessToken 可选访问口令。留空表示完全开放（默认）。
 	// 设置后，请求需携带 ?token=xxx 或 X-Auth-Token 头；首次带 token
 	// 访问会下发同值 Cookie，后续请求即可自动通过。
@@ -108,7 +123,11 @@ func ResolveConfig() (Config, []string) {
 		Addr:       defaultAddr,
 		TimeoutSec: defaultTimeoutSec,
 		MaxResults: defaultMaxResults,
-		ConfigDir:  dir,
+		// PageSize 必须在这里显式给初值：它的零值 0 是一个**合法取值**
+		// （表示"全部显示"），不能靠"零值即默认"来自动兜底，
+		// 否则不设任何配置时页面会一次列完全部结果。
+		PageSize:  defaultPageSize,
+		ConfigDir: dir,
 	}
 
 	var notes []string
@@ -171,6 +190,15 @@ func applyEnv(cfg *Config) []string {
 	setInt(&cfg.TimeoutSec, "AVDB_TIMEOUT_SECONDS")
 	setInt(&cfg.MaxResults, "AVDB_MAX_RESULTS")
 
+	// 每页条数允许 0（= 全部），所以不能复用 setInt（那个只收正整数）。
+	if v, ok := os.LookupEnv("AVDB_PAGE_SIZE"); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n >= 0 {
+			cfg.PageSize = n
+		} else {
+			notes = append(notes, fmt.Sprintf("环境变量 AVDB_PAGE_SIZE=%q 不是非负整数，已忽略", v))
+		}
+	}
+
 	return notes
 }
 
@@ -209,9 +237,10 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.MaxResults <= 0 {
 		cfg.MaxResults = defaultMaxResults
 	}
-	if cfg.MaxResults > 5000 {
-		cfg.MaxResults = 5000
+	if cfg.MaxResults > maxAllowedResults {
+		cfg.MaxResults = maxAllowedResults
 	}
+	cfg.PageSize = normalizePageSize(cfg.PageSize)
 	if cfg.TimeoutSec <= 0 {
 		cfg.TimeoutSec = defaultTimeoutSec
 	}
@@ -223,6 +252,95 @@ func normalizeConfig(cfg Config) Config {
 	}
 	cfg.Timeout = time.Duration(cfg.TimeoutSec) * time.Second
 	return cfg
+}
+
+// ------------------------------------------------- 每页条数（分页）与下载目标
+
+// pageSizeChoices 是结果页/设置页允许选择的每页条数。
+//
+// 0 是一个**合法取值**，含义是"全部显示、不分页"。因此：
+//   - 不能用 `<= 0 就回退默认值` 这种写法做归一化，否则"全部"会被悄悄改成 100；
+//   - 白名单之外的取值（手工改 URL、脏配置）一律回退到默认值，
+//     避免有人用 ?page_size=100000 让本站一次渲染十万行。
+var pageSizeChoices = []int{10, 50, 100, 200, 300, 500, 1000, 0}
+
+// AllowedPageSizes 返回可选的每页条数（含末尾的 0 = 全部）。
+func AllowedPageSizes() []int {
+	out := make([]int, len(pageSizeChoices))
+	copy(out, pageSizeChoices)
+	return out
+}
+
+// IsAllowedPageSize 判断取值是否在白名单内。
+func IsAllowedPageSize(n int) bool {
+	for _, v := range pageSizeChoices {
+		if v == n {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizePageSize 把任意整数收敛到白名单内的合法值。
+func normalizePageSize(n int) int {
+	if IsAllowedPageSize(n) {
+		return n
+	}
+	return defaultPageSize
+}
+
+// PageSizeLabel 把每页条数转成界面文案。
+func PageSizeLabel(n int) string {
+	if n <= 0 {
+		return "全部"
+	}
+	return strconv.Itoa(n)
+}
+
+// ---------------------------------------------------------- 下载目标的解析
+
+// supportedDownloaderIDs 是上游已知的下载器**类型**标识，用于「探测可用下载器」。
+//
+// 这份清单不是抄来的，是用 GET /api/v1/config/downloader/directories 逐个试出来的：
+// 上游对不认识的取值回「不支持的下载工具」，对认识但没配的回「未找到该下载工具配置」，
+// 其余响应（哪怕是 CloudDrive 报的目录读取失败）都说明这个类型是配过的。
+// 前四个来自实测的枚举，clouddrive 是本机上游当前唯一配置过的那一个。
+var supportedDownloaderIDs = []string{"clouddrive", "115", "qbittorrent", "transmission", "thunder"}
+
+// fallbackDownloaderID 是配置为空时的兜底下载器标识。
+//
+// 为什么可以兜底、而不再"什么都不填"：上游把 downloader 改成了必填，
+// 不填的结果是 100% 失败（422），兜底至少给了一条能走通的路。
+//
+// 为什么是 clouddrive：本机上游实测只有一个下载器被真正配置过，就是它
+// （其余 4 个类型都回「未找到该下载工具配置」）；而上游正是通过 CloudDrive2
+// 把离线任务投给 115 网盘。这个值只是**兜底**，设置页里填了任何值都会覆盖它。
+const fallbackDownloaderID = "clouddrive"
+
+// EffectiveDownloader 返回本次提交真正要发给上游的下载器标识。
+// 优先用户显式配置的值，为空时用兜底值——绝不会返回空串。
+func (c Config) EffectiveDownloader() string {
+	if v := strings.TrimSpace(c.Downloader); v != "" {
+		return v
+	}
+	return fallbackDownloaderID
+}
+
+// resolveDownloadTarget 解析出一次下载提交所需的两个参数，并给出"为什么不行"。
+//
+// 两个参数的规则不一致，这是上游定的，不是我们的选择：
+//   - downloader 必有值（配置为空时走兜底），所以它总能拿到；
+//   - save_path 只能由用户提供——上游不接受空值，我们也不能替他猜一个目录
+//     （猜错的代价是文件被丢到一个不存在的路径，而调用方毫不知情）。
+//
+// 返回的 ok 为 false 时，message 是给用户看的、可操作的说明。
+func (c Config) resolveDownloadTarget() (downloader, savePath, message string, ok bool) {
+	if path := strings.TrimSpace(c.SavePath); path != "" {
+		return c.EffectiveDownloader(), path, "", true
+	}
+	return c.EffectiveDownloader(), "", "上游要求保存目录不能为空。" +
+		"请到「设置」页填写「保存路径」——可用「校验下载器并列出目录」把上游已配置的目录列出来直接选；" +
+		"也可以点「读取上游默认下载器」，把上游自己配的目录继承过来。", false
 }
 
 // normalizeAddr 把 "8080" 这类裸端口补成 ":8080"，避免 ListenAndServe 报错。

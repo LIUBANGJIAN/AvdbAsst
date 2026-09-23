@@ -95,11 +95,14 @@ jobs:
             # 每个提交一个 sha 标签，便于精确回滚
             type=sha,prefix=sha-,format=short
 
-      - name: 计算版本号
+      - name: 计算版本号与构建标识
         id: ver
-        # 注入到二进制里的版本串。刻意不直接用 github.ref_name：
-        # 推 main 时它的值恒为 "main"，页面右上角永远显示同一个词，区分不了构建。
-        # 加上短 sha 之后，"哪次提交的镜像"一眼可辨；打 tag 时则用 tag 本身。
+        # 两者分工不同，别混为一谈：
+        #   VERSION —— 页面右上角显示的**语义化版本号**。打 tag 时用 tag；
+        #              推分支时留空，让镜像沿用源码里的版本号，
+        #              这样"v1.1.0 修了什么"是可比较的。
+        #   BUILD   —— 构建标识（分支@短 sha），用于区分同一版本号的不同构建，
+        #              只出现在设置页与 /healthz，不占右上角。
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
@@ -107,10 +110,11 @@ jobs:
         run: |
           short="$(printf '%s' "$SHA" | cut -c1-7)"
           if [ "$REF_TYPE" = "tag" ]; then
-            echo "value=$REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "version=$REF_NAME" >> "$GITHUB_OUTPUT"
           else
-            echo "value=$REF_NAME@$short" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
           fi
+          echo "build=$REF_NAME@$short" >> "$GITHUB_OUTPUT"
 
       - name: 构建并推送
         uses: docker/build-push-action@v6
@@ -125,7 +129,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            VERSION=${{ steps.ver.outputs.value }}
+            VERSION=${{ steps.ver.outputs.version }}
+            BUILD=${{ steps.ver.outputs.build }}
 
       - name: 输出摘要
         run: |

@@ -20,6 +20,12 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError + 1}))
 }
 
+// testDownloaderID 是测试夹具里的下载器标识。
+//
+// 提成常量是因为它被"夹具"和"断言"两处引用：改一处忘一处就会出现
+// "测试还在断言旧值"这种假失败，而假失败最消耗注意力。
+const testDownloaderID = "115"
+
 // newTestApp 用假的"上游"构造一个完整应用，避免测试依赖真实的 Avdb 服务。
 func newTestApp(t *testing.T, upstream http.HandlerFunc, mutate ...func(*Config)) *App {
 	t.Helper()
@@ -29,12 +35,15 @@ func newTestApp(t *testing.T, upstream http.HandlerFunc, mutate ...func(*Config)
 	cfg := Config{
 		APIBaseURL: server.URL,
 		APIKey:     "test-key",
-		Downloader: "115",
+		Downloader: testDownloaderID,
 		SavePath:   "/media",
 		Addr:       ":0",
 		TimeoutSec: 5,
 		Timeout:    5 * time.Second,
-		MaxResults: 100,
+		// 与生产默认值保持一致：安全阀开在 5000，每页 100 条。
+		// 早先这里是 100/100，会让"翻页"根本没有发生的空间。
+		MaxResults: defaultMaxResults,
+		PageSize:   defaultPageSize,
 		// 每个测试实例都指向独立的临时配置目录，
 		// 既不污染工作区，也让"保存/重载"类测试互不干扰。
 		ConfigDir: t.TempDir(),
@@ -368,7 +377,12 @@ func TestSearchTimeoutIsFriendly(t *testing.T) {
 	}
 }
 
-func TestSearchMaxResultsTruncates(t *testing.T) {
+// TestSearchSafetyValveTruncates 验证"结果安全阀"确实会拦下异常大的结果集。
+//
+// 注意语义变化：MaxResults 已经不是页面上的"结果上限"（那一项按用户要求
+// 去掉了，搜索结果本身没有上限），它现在的职责是防止异常上游一次返回几十万条
+// 把进程内存打满。触发时仍然要给出提示。
+func TestSearchSafetyValveTruncates(t *testing.T) {
 	app := newTestApp(t, upstreamWith(upstreamSample), func(c *Config) { c.MaxResults = 1 })
 
 	rec := do(app, http.MethodGet, "/s?q=abc")
@@ -377,8 +391,8 @@ func TestSearchMaxResultsTruncates(t *testing.T) {
 	if !strings.Contains(body, `id="result-count">1<`) {
 		t.Errorf("应被截断为 1 条；片段: %s", excerpt(body, "id=\"result-count\""))
 	}
-	if !strings.Contains(body, "仅显示前") {
-		t.Error("截断时应给出提示")
+	if !strings.Contains(body, "结果过多") {
+		t.Error("触发安全阀时应给出提示")
 	}
 }
 
@@ -625,7 +639,7 @@ func TestDownloadSuccess(t *testing.T) {
 	if gotMethod != http.MethodGet {
 		t.Errorf("后端请求上游应使用 GET，实际 %s", gotMethod)
 	}
-	if !strings.Contains(gotPath, "downloader=115") || !strings.Contains(gotPath, "save_path=%2Fmedia") {
+	if !strings.Contains(gotPath, "downloader="+testDownloaderID) || !strings.Contains(gotPath, "save_path=%2Fmedia") {
 		t.Errorf("上游请求缺少参数: %s", gotPath)
 	}
 	if gotKey != "test-key" {
@@ -633,49 +647,73 @@ func TestDownloadSuccess(t *testing.T) {
 	}
 }
 
-// TestDownloadOmitsEmptyDownloader 是线上三次报错的合并回归测试。
-// 三次都出自同一个接口，但错在各不相同的地方，因此三条不变量要一起守：
+// TestDownloadRequiresConfiguredSavePath 守住"保存目录必填且不能为空"。
 //
-//	第 1 次：只在非空时才拼参数 → 上游 422（缺 save_path）；
-//	第 2 次：改成"始终发送"、downloader 传空串 → 上游回 `未找到下载器`；
-//	第 3 次：仍然发空值，只是改成猜一个"115" → 上游回
-//	        `未找到下载器: Downloader.115`。
+// 上游对空 save_path 的回答是「保存目录不能为空」，对缺失的回答是 422。
+// 两种都不该让用户看到——本站必须在**发请求之前**拦下，并告诉他去哪补：
+// 一句英文校验错误对用户毫无信息量，而"去设置页填保存路径"立刻可执行。
 //
-// 第 2、3 次的共同错误是**把"未设置"编码成了一个值**。上游的语义是：
-// downloader 未设置就**不要传这个参数**，它会自己去用全局默认下载器。
-// 传空串等于告诉它"去找一个 id 为空的下载器"，猜 "115" 等于问它
-// "有没有叫 115 的下载器"——两者都不是用户想表达的意思。
-//
-// 要守住的三条：
-//  1. tid 必传；
-//  2. save_path 必传，空值也传（上游确实接受空串，这条是实测出来的差异）；
-//  3. downloader 未设置时**参数不得出现**，而不是出现且为空。
-func TestDownloadOmitsEmptyDownloader(t *testing.T) {
-	var gotPath string
+// 同时断言"没有触达上游"：既然参数注定不合法，发出去只是白等一轮超时。
+func TestDownloadRequiresConfiguredSavePath(t *testing.T) {
+	var hit bool
 	app := newTestApp(t, func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.RequestURI()
+		hit = true
 		_, _ = io.WriteString(w, `{"code":0,"message":"操作成功"}`)
 	}, func(c *Config) {
-		// 故意清空：模拟"用户什么都没填"的最常见部署形态。
+		// 模拟"用户什么都没填"的最常见部署形态。
 		c.Downloader = ""
 		c.SavePath = ""
 	})
 
 	rec := doDownload(app, "3691410")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("状态码 = %d, 期望 400", rec.Code)
+	}
+	if hit {
+		t.Error("保存路径没配时不应向上游发请求：注定会失败，只是白等一轮")
+	}
+
+	var resp downloadResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if resp.Success {
+		t.Error("保存路径为空时 success 必须为 false")
+	}
+	for _, want := range []string{"保存路径", "设置"} {
+		if !strings.Contains(resp.Message, want) {
+			t.Errorf("提示里应包含 %q，实际 %q", want, resp.Message)
+		}
+	}
+}
+
+// TestDownloadFallsBackToDefaultDownloader 守住"下载器绝不会是空串"。
+//
+// 上游把 downloader 改成必填之后，"配置留空"再也不能翻译成"不发这个参数"。
+// 本站的处理是给一个实测有效的兜底标识；这里断言它确实被发了出去，
+// 而不是留下一个空值去撞 422。
+func TestDownloadFallsBackToDefaultDownloader(t *testing.T) {
+	var gotPath string
+	app := newTestApp(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		_, _ = io.WriteString(w, `{"code":0,"message":"操作成功"}`)
+	}, func(c *Config) {
+		c.Downloader = ""
+		c.SavePath = "/media/movies"
+	})
+
+	rec := doDownload(app, "3691410")
 	if rec.Code != http.StatusOK {
-		t.Fatalf("状态码 = %d, 期望 200", rec.Code)
+		t.Fatalf("状态码 = %d, 期望 200（上游已配好下载器与目录时应当成功）；body=%s",
+			rec.Code, rec.Body.String())
 	}
 
 	query := mustParseQuery(t, gotPath)
-	if _, ok := query["tid"]; !ok {
-		t.Errorf("上游请求缺少 tid: %s", gotPath)
+	if got := query.Get("downloader"); got != fallbackDownloaderID {
+		t.Errorf("downloader = %q，期望兜底值 %q（URI: %s）", got, fallbackDownloaderID, gotPath)
 	}
-	if _, ok := query["save_path"]; !ok {
-		t.Errorf("上游请求缺少 save_path（正是第 1 次 422 的成因）: %s", gotPath)
-	}
-	if _, ok := query["downloader"]; ok {
-		t.Errorf("未设置下载器时不应发送 downloader 参数（发送空串会让上游去找 id 为空的下载器，返回『未找到下载器』），实际发送了 %q",
-			query.Get("downloader"))
+	if got := query.Get("save_path"); got != "/media/movies" {
+		t.Errorf("save_path = %q，期望原样发送", got)
 	}
 }
 
@@ -712,7 +750,15 @@ func TestDownloadUpstreamUnreachable(t *testing.T) {
 	target := server.URL
 	server.Close() // 立刻关闭，制造"连不上"
 
-	app := NewApp(Config{APIBaseURL: target, Timeout: 2 * time.Second, Addr: ":0"}, discardLogger())
+	app := NewApp(Config{
+		APIBaseURL: target,
+		Timeout:    2 * time.Second,
+		Addr:       ":0",
+		// 下载目标必须配齐：否则会在发请求前就被"保存目录不能为空"拦下，
+		// 测不到"连不上上游"这条路径。
+		Downloader: "clouddrive",
+		SavePath:   "/media",
+	}, discardLogger())
 	rec := doDownload(app, "1")
 
 	if rec.Code != http.StatusBadGateway {
@@ -972,15 +1018,25 @@ func TestSettingsPageRenders(t *testing.T) {
 
 	for _, name := range []string{
 		`name="api_base_url"`, `name="api_key"`, `name="default_downloader"`,
-		`name="default_save_path"`, `name="access_token"`,
-		`name="timeout_seconds"`, `name="max_results"`,
+		`name="default_save_path"`, `name="access_token"`, `name="page_size"`,
 	} {
 		if !strings.Contains(body, name) {
 			t.Errorf("设置页面缺少字段 %s", name)
 		}
 	}
+	// 「请求超时」「结果上限」已按用户要求下线：搜索结果不再设上限，
+	// 超时属于部署细节。它们必须彻底从表单里消失，而不是藏起来——
+	// 留着输入框就会让人以为改了有用。
+	for _, name := range []string{`name="timeout_seconds"`, `name="max_results"`} {
+		if strings.Contains(body, name) {
+			t.Errorf("设置页面不应再出现字段 %s", name)
+		}
+	}
 	if !strings.Contains(body, `id="btn-test"`) {
 		t.Error("设置页面缺少测试连接按钮")
+	}
+	if !strings.Contains(body, `id="btn-probe-downloaders"`) {
+		t.Error("设置页面缺少「探测可用下载器」按钮")
 	}
 }
 
@@ -1031,10 +1087,9 @@ func TestSettingsSavePersistsAndApplies(t *testing.T) {
 	form := url.Values{
 		"api_base_url":       {"http://new-host:9999"},
 		"api_key":            {"new-secret-key"},
-		"default_downloader": {"115"},
+		"default_downloader": {"clouddrive"},
 		"default_save_path":  {"/影视/新目录"},
-		"timeout_seconds":    {"30"},
-		"max_results":        {"88"},
+		"page_size":          {"200"},
 	}
 	rec := doForm(app, "/settings", form, "http://example.com")
 
@@ -1063,8 +1118,11 @@ func TestSettingsSavePersistsAndApplies(t *testing.T) {
 	if cfg.APIKey != "new-secret-key" {
 		t.Errorf("热更新失败，APIKey = %q", cfg.APIKey)
 	}
-	if cfg.MaxResults != 88 {
-		t.Errorf("热更新失败，MaxResults = %d", cfg.MaxResults)
+	if cfg.PageSize != 200 {
+		t.Errorf("热更新失败，PageSize = %d", cfg.PageSize)
+	}
+	if cfg.Downloader != "clouddrive" {
+		t.Errorf("热更新失败，Downloader = %q", cfg.Downloader)
 	}
 	if cfg.SavePath != "/影视/新目录" {
 		t.Errorf("中文保存路径被破坏: %q", cfg.SavePath)
@@ -1077,6 +1135,11 @@ func TestSettingsSavePersistsAndApplies(t *testing.T) {
 	reloaded, _ := ResolveConfig()
 	if reloaded.APIKey != "new-secret-key" || reloaded.APIBaseURL != "http://new-host:9999" {
 		t.Errorf("重启后配置丢失: key=%q base=%q", reloaded.APIKey, reloaded.APIBaseURL)
+	}
+	// 每页条数是"永久设置"：用户要求"直到下次再设置"之前一直生效，
+	// 所以重启后也必须保持，不能被 normalizeConfig 悄悄改回 100。
+	if reloaded.PageSize != 200 {
+		t.Errorf("重启后每页条数丢失: PageSize = %d，期望 200", reloaded.PageSize)
 	}
 }
 
@@ -1364,28 +1427,55 @@ func TestSettingsSaveSetsCookieForNewToken(t *testing.T) {
 	}
 }
 
-func TestSettingsAdvancedFieldsClamped(t *testing.T) {
-	app := newTestApp(t, upstreamWith(upstreamSample))
+// TestSettingsPageSizeWhitelist 守住每页条数的白名单与"0 = 全部"这条特殊取值。
+//
+// 三个容易写错的点，逐个钉住：
+//   - 0 是合法值（全部显示），不能被"<=0 就回默认值"的写法吃掉；
+//   - 白名单外的值（99999 / 负数）必须被忽略，否则 ?page_size=99999
+//     会让结果页一次渲染十万行；
+//   - 非数字输入保留原值，而不是静默重置。
+func TestSettingsPageSizeWhitelist(t *testing.T) {
+	app := newTestApp(t, upstreamWith(upstreamSample), func(c *Config) { c.PageSize = 100 })
 
-	rec := doForm(app, "/settings", url.Values{
-		"api_base_url":    {"http://host:1"},
-		"timeout_seconds": {"99999"},
-		"max_results":     {"-3"},
-	}, "http://example.com")
+	cases := []struct {
+		name  string
+		input string
+		want  int
+	}{
+		{"白名单内的值生效", "300", 300},
+		{"0 表示全部并保留", "0", 0},
+		{"超界值被忽略", "99999", 100},
+		{"负数被忽略", "-3", 100},
+		{"非数字保留原值", "abc", 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app.applyConfig(normalizeConfig(Config{
+				APIBaseURL: "http://host:1",
+				ConfigDir:  t.TempDir(),
+				PageSize:   100,
+			}))
 
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("状态码 = %d, 期望 303", rec.Code)
-	}
-	cfg := app.currentConfig()
-	if cfg.TimeoutSec != 600 {
-		t.Errorf("超时未收敛到上限 600，实际 %d", cfg.TimeoutSec)
-	}
-	if cfg.MaxResults != 1 {
-		t.Errorf("结果上限未收敛到下限 1，实际 %d", cfg.MaxResults)
+			rec := doForm(app, "/settings", url.Values{
+				"api_base_url": {"http://host:1"},
+				"page_size":    {tc.input},
+			}, "http://example.com")
+			if rec.Code != http.StatusSeeOther {
+				t.Fatalf("状态码 = %d, 期望 303", rec.Code)
+			}
+			if got := app.currentConfig().PageSize; got != tc.want {
+				t.Errorf("page_size=%q → PageSize = %d，期望 %d", tc.input, got, tc.want)
+			}
+		})
 	}
 }
 
-func TestSettingsAdvancedFieldsIgnoreGarbage(t *testing.T) {
+// TestSettingsIgnoresRetiredFields 确认已下线的表单项无法再影响配置。
+//
+// 「请求超时」「结果上限」两个输入框已按用户要求移除。如果有人只删了 HTML
+// 而没删处理器里的赋值，外部调用方仍能通过 POST 把它们改掉——
+// 页面上看不到、行为却还在变，是最难查的一类偏差。
+func TestSettingsIgnoresRetiredFields(t *testing.T) {
 	app := newTestApp(t, upstreamWith(upstreamSample), func(c *Config) {
 		c.TimeoutSec = 20
 		c.MaxResults = 100
@@ -1393,7 +1483,7 @@ func TestSettingsAdvancedFieldsIgnoreGarbage(t *testing.T) {
 
 	rec := doForm(app, "/settings", url.Values{
 		"api_base_url":    {"http://host:1"},
-		"timeout_seconds": {"abc"},
+		"timeout_seconds": {"99999"},
 		"max_results":     {"1e9"},
 	}, "http://example.com")
 
@@ -1402,10 +1492,10 @@ func TestSettingsAdvancedFieldsIgnoreGarbage(t *testing.T) {
 	}
 	cfg := app.currentConfig()
 	if cfg.TimeoutSec != 20 {
-		t.Errorf("非数字输入应保留原值，实际 %d", cfg.TimeoutSec)
+		t.Errorf("已下线的「请求超时」仍被表单改写，实际 %d", cfg.TimeoutSec)
 	}
 	if cfg.MaxResults != 100 {
-		t.Errorf("非整数输入应保留原值，实际 %d", cfg.MaxResults)
+		t.Errorf("已下线的「结果上限」仍被表单改写，实际 %d", cfg.MaxResults)
 	}
 }
 

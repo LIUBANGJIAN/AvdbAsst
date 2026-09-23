@@ -559,9 +559,9 @@ func TestSettingsDirectoriesFallsBackToSavedDownloader(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("状态码 = %d，响应 %s", rec.Code, rec.Body.String())
 	}
-	// newTestApp 的默认配置里下载器是 115。
-	if got := gotQuery.Get("downloader_id"); got != "115" {
-		t.Errorf("应沿用已保存的下载器 115，实际 %q", got)
+	// 表单没带 downloader_id 时，应沿用已保存的下载器。
+	if got := gotQuery.Get("downloader_id"); got != testDownloaderID {
+		t.Errorf("应沿用已保存的下载器 %q，实际 %q", testDownloaderID, got)
 	}
 }
 
@@ -610,16 +610,44 @@ func TestSettingsDirectoriesInheritsSavedTargetWhenFormOmitsIt(t *testing.T) {
 // ------------------------------------------------------------ 错误人话化
 
 func TestHumanizeDownloadFailureExplainsDownloaderNotFound(t *testing.T) {
-	cfg := Config{Downloader: "115"}
+	const sent = "clouddrive"
 
 	for _, raw := range []string{
 		"未找到下载器: 115",
 		"Downloader not found: 115",
 		"unknown downloader",
 	} {
-		got := humanizeDownloadFailure(raw, cfg)
+		got := humanizeDownloadFailure(raw, sent)
 		if !strings.Contains(got, "设置") {
 			t.Errorf("对 %q 应给出指向设置页的指引，实际 %q", raw, got)
+		}
+		if !strings.Contains(got, raw) {
+			t.Errorf("应保留上游原文便于排查，实际 %q", got)
+		}
+		// 提示里必须出现**本次真正发出去**的标识，而不是配置里可能为空的原始值——
+		// 否则用户会看到"请检查你填的 xxx"，而那句 xxx 他从来没填过。
+		if !strings.Contains(got, sent) {
+			t.Errorf("应说明实际发送的标识 %q，实际 %q", sent, got)
+		}
+	}
+}
+
+// TestHumanizeDownloadFailureExplainsEmptySavePath 覆盖上游拒绝保存目录的情形。
+//
+// 上游把 save_path 判为必填且不接受空值，返回的原文只有一句
+// 「保存目录不能为空」。这时要告诉用户去哪个页面把路径补上，
+// 以及怎么把上游已配置的目录列出来。
+func TestHumanizeDownloadFailureExplainsEmptySavePath(t *testing.T) {
+	for _, raw := range []string{
+		"保存目录不能为空",
+		"上游参数校验失败（422）：查询参数 → save_path：Field required",
+	} {
+		got := humanizeDownloadFailure(raw, "clouddrive")
+		if !strings.Contains(got, "保存路径") {
+			t.Errorf("对 %q 应指出要填「保存路径」，实际 %q", raw, got)
+		}
+		if !strings.Contains(got, "目录") {
+			t.Errorf("对 %q 应提示可以列出上游目录，实际 %q", raw, got)
 		}
 		if !strings.Contains(got, raw) {
 			t.Errorf("应保留上游原文便于排查，实际 %q", got)
@@ -627,21 +655,9 @@ func TestHumanizeDownloadFailureExplainsDownloaderNotFound(t *testing.T) {
 	}
 }
 
-// TestHumanizeDownloadFailurePointsAtUpstreamDefault 确认当本站没配下载器时，
-// 提示指向"读取上游默认下载器"这条正路，而不是让用户去猜一个标识。
-//
-// 这是本次修复的核心：用户之前收到的 `未找到下载器: Downloader.115` 之所以
-// 令人困惑，就是因为提示只说"没找到"，没说"其实你可以不填"。
-func TestHumanizeDownloadFailurePointsAtUpstreamDefault(t *testing.T) {
-	got := humanizeDownloadFailure("未找到下载器: Downloader.115", Config{Downloader: ""})
-	if !strings.Contains(got, "上游默认") {
-		t.Errorf("未配置下载器时应提示可以用上游默认值，实际 %q", got)
-	}
-}
-
 func TestHumanizeDownloadFailureLeavesOtherErrorsAlone(t *testing.T) {
 	raw := "磁盘空间不足"
-	if got := humanizeDownloadFailure(raw, Config{Downloader: "115"}); got != raw {
+	if got := humanizeDownloadFailure(raw, "clouddrive"); got != raw {
 		t.Errorf("无关错误不应被改写，实际 %q", got)
 	}
 }

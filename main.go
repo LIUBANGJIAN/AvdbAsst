@@ -21,15 +21,23 @@ import (
 	"time"
 )
 
-// version 由构建时通过 -ldflags "-X main.version=..." 注入。
-var version = "dev"
+// version 是**语义化版本号**，显示在页面右上角。
+//
+// 它刻意不是"序号/构建号"：用户要的是"这个容器跑的是哪一版功能"，
+// 而 `main@abc1234` 这种串只能回答"哪次提交"，答不了"比上一版多了什么"。
+// 每次功能变更手动递增这里的值；打 tag 发布时由 CI 用 tag 覆盖它。
+var version = "v1.1.0"
+
+// build 是构建标识（分支@短 sha），用于区分同一版本号的不同构建。
+// 它不进右上角的徽标，只在设置页「运行信息」与 /healthz 里出现。
+var build = "dev"
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Println("avdbasst", version)
+		fmt.Println("avdbasst", version, build)
 		return
 	}
 

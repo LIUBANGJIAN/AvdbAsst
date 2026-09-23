@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
 <meta name="referrer" content="same-origin">
-<title>设置 · Avdb 搜索</title>
+<title>设置 · {{siteName}}</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -18,13 +18,13 @@
         <circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/>
         <line x1="15.4" y1="15.4" x2="21" y2="21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
       </svg>
-      <span>Avdb</span>
+      <span>{{siteName}}</span>
     </a>
     <nav class="topnav">
       <a href="/">搜索</a>
       <a class="is-active" href="/settings">设置</a>
     </nav>
-    <span class="ver-badge" title="当前运行的版本">{{.Version}}</span>
+    <span class="ver-badge" title="当前版本 {{.Version}}{{if .Build}}（构建 {{.Build}}）{{end}}">{{.Version}}</span>
   </div>
 </header>
 
@@ -87,30 +87,50 @@
     <section class="panel">
       <h2>下载</h2>
       <p class="panel-hint">
-        两项都留空 = 直接用上游配好的默认下载目标，不必在这里填。
-        上游没有默认配置时点「读取上游默认下载器」把真实值取回来。
+        上游现在把「下载器」与「保存路径」都判为必填，两者都不能留空。
+        不知道该填什么时，先点「探测可用下载器」——它只用访问令牌就能问出上游配过哪个下载器。
       </p>
 
       <div class="field-row">
-        <label for="default_downloader">下载器标识</label>
+        <label for="default_downloader">下载器</label>
         <input type="text" id="default_downloader" name="default_downloader" value="{{.Downloader}}"
-               placeholder="留空 = 用上游默认下载器" spellcheck="false">
+               list="downloader-options" placeholder="{{.DownloaderPlaceholder}}" spellcheck="false">
       </div>
+      <datalist id="downloader-options">
+        {{range .DownloaderOptions}}<option value="{{.}}"></option>{{end}}
+      </datalist>
 
       <div class="field-row">
         <label for="default_save_path">保存路径</label>
         <input type="text" id="default_save_path" name="default_save_path" value="{{.SavePath}}"
-               list="save-path-options" placeholder="留空 = 用上游默认目录" spellcheck="false">
+               list="save-path-options" placeholder="留空将无法提交下载" spellcheck="false">
       </div>
       <datalist id="save-path-options">
         {{range .SavePathOptions}}<option value="{{.}}"></option>{{end}}
       </datalist>
 
       <div class="field-actions">
+        <button type="button" class="btn btn-ghost" id="btn-probe-downloaders">探测可用下载器</button>
         <button type="button" class="btn btn-ghost" id="btn-default-rule">读取上游默认下载器</button>
         <button type="button" class="btn btn-ghost" id="btn-check-downloader">校验下载器并列出目录</button>
       </div>
       <p class="test-result" id="downloader-result" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="panel">
+      <h2>结果展示</h2>
+
+      <div class="field-row">
+        <label for="page_size">每页条数</label>
+        <select id="page_size" name="page_size">
+          {{$current := .PageSize}}
+          {{range .PageSizeOptions}}<option value="{{.Value}}"{{if eq .Value $current}} selected{{end}}>{{.Label}}</option>{{end}}
+        </select>
+      </div>
+      <p class="panel-hint">
+        搜索结果没有条数上限，超出的部分分页显示；选「全部」则一次列完。
+        该设置会永久保存，直到你下次再改——结果页上也能直接调。
+      </p>
     </section>
 
     <section class="panel">
@@ -131,24 +151,6 @@
       {{end}}
     </section>
 
-    <section class="panel">
-      <h2>高级</h2>
-
-      <div class="field-row">
-        <label for="timeout_seconds">请求超时</label>
-        <input type="number" id="timeout_seconds" name="timeout_seconds" value="{{.TimeoutSec}}"
-               min="1" max="600" step="1">
-        <span class="field-unit">秒</span>
-      </div>
-
-      <div class="field-row">
-        <label for="max_results">结果上限</label>
-        <input type="number" id="max_results" name="max_results" value="{{.MaxResults}}"
-               min="1" max="5000" step="1">
-        <span class="field-unit">条</span>
-      </div>
-    </section>
-
     <div class="form-actions">
       <button type="submit" class="btn btn-primary">保存设置</button>
       <a class="btn btn-ghost" href="/">返回搜索</a>
@@ -160,7 +162,7 @@
     <dl class="kv kv-wide">
       <dt>配置文件</dt><dd><code>{{.ConfigPath}}</code></dd>
       <dt>配置目录</dt><dd><code>{{.ConfigDir}}</code>{{if .ConfigWritable}}（可写）{{else}}（<strong>不可写</strong>）{{end}}</dd>
-      <dt>版本</dt><dd>{{.Version}}</dd>
+      <dt>版本</dt><dd>{{.Version}}{{if .Build}}<span class="kv-note">构建 {{.Build}}</span>{{end}}</dd>
       <dt>本站地址</dt><dd><code>{{.BaseURL}}</code></dd>
     </dl>
     <p class="panel-hint">容器部署请把宿主目录挂载到配置目录；密钥类字段以 0600 权限写入 <code>config.json</code>。</p>

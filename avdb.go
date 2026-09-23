@@ -157,25 +157,24 @@ func (c *AvdbClient) Ping(ctx context.Context) error {
 // SubmitDownload 把某条资源交给上游的下载器。
 // 返回值：(上游原始响应体, 上游 HTTP 状态码, error)。
 //
-// 两个参数的语义**不一样**，别把它们当成一对：
+// **三个参数现在全是必填**，这与本文档早期版本（以及随包附带的 API接口.md）不一致，
+// 以上游当前版本的实际行为为准：
 //
-//   - tid：必填。
-//   - save_path：上游判为必填。实测缺失即返回
-//     422 {"detail":[{"type":"missing","loc":["query","save_path"]...}]}，
-//     所以这里**始终发送**，空值也发（空串是被接受的）。
-//   - downloader：选填。"留空即继承上游的全局下载器"这个语义是对的，
-//     但**正确的实现是省略这个 query 参数，而不是发送空串**——上游会把空串
-//     当成一个名叫"空"的下载器去查，然后回一句 `未找到下载器`。
-//     本项目先后踩过"发空串"和"猜一个 115"两种错法，都不是它的本意。
+//   - tid：必填，上游 openapi 标 required。
+//   - downloader：必填。早期上游把它当"选填"，留空即继承它的全局默认下载器；
+//     现在缺这个参数会直接返回
+//     422 {"detail":[{"type":"missing","loc":["query","downloader"]...}]}。
+//     取值不是随便写的字符串，而是上游的下载器类型标识（如 115 / qbittorrent /
+//     transmission / thunder / clouddrive），写错只会拿到 `未找到下载器: xxx`。
+//   - save_path：必填，且**不能为空串**——空串会拿到 `保存目录不能为空`。
 //
-// 因此这里按"有值才带"处理：downloader 为空时它在查询串里根本不出现。
+// 结论：本站不再有"留空即交给上游"这条路，两个参数都必须由调用方给出确定值。
+// 上层用 Config.resolveDownloadTarget 负责把它们解析出来（或明确拒绝提交）。
 func (c *AvdbClient) SubmitDownload(ctx context.Context, tid, downloader, savePath string) ([]byte, int, error) {
 	q := url.Values{
-		"tid":       {tid},
-		"save_path": {strings.TrimSpace(savePath)},
-	}
-	if id := strings.TrimSpace(downloader); id != "" {
-		q.Set("downloader", id)
+		"tid":        {tid},
+		"downloader": {strings.TrimSpace(downloader)},
+		"save_path":  {strings.TrimSpace(savePath)},
 	}
 	return c.request(ctx, http.MethodGet, "/api/v1/articles/download/manul", q)
 }
