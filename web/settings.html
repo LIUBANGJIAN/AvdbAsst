@@ -127,6 +127,19 @@
         搜索结果没有条数上限，超出的部分分页显示；选「全部」则一次列完。
         该设置会永久保存，直到你下次再改——结果页上也能直接调。
       </p>
+
+      {{/* 网站名称开关：默认关闭。关闭时标签页标题恒为站名，
+          开启后变成「关键词 · 资源搜索」。 */}}
+      <div class="field-row field-row-inline">
+        <span class="field-spacer"></span>
+        <label class="checkbox">
+          <input type="checkbox" id="title_with_keyword" name="title_with_keyword" value="1"{{if .TitleWithKeyword}} checked{{end}}>
+          网站名称里带上搜索关键词
+        </label>
+      </div>
+      <p class="panel-hint">
+        关闭时浏览器标签页只显示「资源搜索」，开启后显示「关键词 · 资源搜索」。
+      </p>
     </section>
 
     <section class="panel">

@@ -33,12 +33,22 @@ check() {
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1（期望 $3，实际 $2）"; fi
 }
 
+# 断言助手统一用 here-string 喂 grep，**不要**用管道。
+#
+# 原因：脚本开了 `set -o pipefail`，而 `grep -q` 一命中就退出。
+# 于是 `printf '%s' "$body" | grep -qF -- "$want"` 里，
+# 写端 printf 还在往管道里灌、读端已经走了，printf 收到 SIGPIPE 而死在 141；
+# pipefail 把整条管道的状态取成 141，`if` 判为假——
+# **命中了却报"未找到"**。触发条件很隐蔽：只有当响应体大于管道缓冲
+# （约 64KB）、且命中点落在缓冲之内时才会发作。结果条数一多就中，
+# 寥寥几条时一切正常，所以它是一颗随数据量引爆的哑雷。
+# here-string 由 bash 用临时文件实现，grep 读到的是普通文件，不存在写端被打断的问题。
 contains() {
-  if printf '%s' "$2" | grep -qF -- "$3"; then ok "$1"; else bad "$1（未找到 $3）"; fi
+  if grep -qF -- "$3" <<<"$2"; then ok "$1"; else bad "$1（未找到 $3）"; fi
 }
 
 missing() {
-  if printf '%s' "$2" | grep -qF -- "$3"; then bad "$1（不该出现 $3）"; else ok "$1"; fi
+  if grep -qF -- "$3" <<<"$2"; then bad "$1（不该出现 $3）"; else ok "$1"; fi
 }
 
 # curl_get <url> [额外参数...] —— 自动附带鉴权头
@@ -108,7 +118,7 @@ printf '\n\033[1m[5] 搜索链路\033[0m\n'
 search_page="$(body_of "$BASE_URL/s?q=$QUERY")"
 check "GET /s?q=$QUERY" "$(status_of "$BASE_URL/s?q=$QUERY")" "200"
 
-if printf '%s' "$search_page" | grep -q 'class="alert'; then
+if grep -q 'class="alert' <<<"$search_page"; then
   note "搜索返回了错误页（上游未配置或不可达），跳过结果断言"
   printf '        提示：打开 %s/settings 检查上游地址与 API Key\n' "$BASE_URL"
 else

@@ -40,6 +40,22 @@ func templateFuncs() template.FuncMap {
 		"formatDate": formatDate,
 		// siteName 让页头、标题、描述用同一个产品名，改一处即可全站生效。
 		"siteName": func() string { return siteName },
+		// pageTitle 生成浏览器标签页的标题。
+		//
+		// 关键词是否出现由设置页的开关决定，**默认不出现**（见
+		// Config.TitleWithKeyword）。两个条件缺一不可：
+		//   - withKeyword 为假 → 恒为站名；
+		//   - 关键词为空（首页、或只有筛选参数）→ 也只有站名，
+		//     否则会渲染出「 · 资源搜索」这种以一个分隔符开头的标题。
+		//
+		// 返回的字符串仍会被 html/template 按上下文转义，
+		// 所以关键词里带尖括号也进不了页面结构。
+		"pageTitle": func(keyword string, withKeyword bool) string {
+			if k := strings.TrimSpace(keyword); withKeyword && k != "" {
+				return k + " · " + siteName
+			}
+			return siteName
+		},
 		// add 给结果行编号用：{{add .StartedAt $i}} 算出该行的全局序号，
 		// 模板本身没有算术能力。
 		"add": func(a, b int) int { return a + b },

@@ -405,6 +405,10 @@ type viewData struct {
 	Keyword  string
 	Torrents []Torrent
 
+	// TitleWithKeyword 决定标签页标题是否带关键词，由设置页的开关持久化。
+	// 模板**不能**直接读配置（配置不在模板的数据模型里），所以必须显式投影。
+	TitleWithKeyword bool
+
 	Error     string
 	Truncated bool
 
@@ -616,6 +620,8 @@ func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Version:  a.version,
 		Build:    a.build,
 		PageSize: cfg.PageSize,
+		// 标题开关对所有页面形态都生效：首页、结果页、错误页用的是同一份视图数据。
+		TitleWithKeyword: cfg.TitleWithKeyword,
 		// 还没配好上游地址/令牌时，在首屏直接引导去设置页面，
 		// 而不是让用户对着一条看不懂的报错发呆。
 		NeedSetup:       cfg.APIKey == "",
@@ -1207,6 +1213,10 @@ type settingsViewData struct {
 	PageSize        int
 	PageSizeOptions []pageSizeOption
 
+	// TitleWithKeyword 是「网站名称带搜索关键词」开关的当前状态，
+	// 决定设置页那个复选框是勾上的还是空着的。默认 false（关闭）。
+	TitleWithKeyword bool
+
 	// SavePathOptions 是上次从上游列出的目录候选，只用于给输入框提供
 	// 下拉提示（<datalist>），不改变任何默认行为。
 	SavePathOptions []string
@@ -1249,6 +1259,8 @@ func (a *App) buildSettingsData(cfg Config) settingsViewData {
 
 		PageSize:        cfg.PageSize,
 		PageSizeOptions: pageSizeOptions(cfg.PageSize),
+
+		TitleWithKeyword: cfg.TitleWithKeyword,
 
 		SavePathOptions: cfg.SavePathOptions,
 
@@ -1324,6 +1336,13 @@ func (a *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 	next.AccessToken = resolveSecret(r.PostFormValue("access_token"), r.PostFormValue("clear_access_token") != "", cfg.AccessToken)
 
 	next.PageSize = settingsPageSize(r, cfg.PageSize)
+
+	// 复选框：浏览器**只在勾选时**才提交它，所以"字段缺失"就等于"关闭"。
+	// 这与 clear_api_key 的语义一致，也是复选框这一类控件的固有约束——
+	// 想区分"用户取消勾选"和"这份表单压根没这个字段"需要额外的 hidden
+	// 配对字段，而当前两者行为相同，不值当。
+	next.TitleWithKeyword = r.PostFormValue("title_with_keyword") != ""
+
 	next = normalizeConfig(next)
 
 	if err := next.Validate(); err != nil {
@@ -1342,6 +1361,7 @@ func (a *App) handleSettingsSave(w http.ResponseWriter, r *http.Request) {
 		"upstream", next.APIBaseURL,
 		"key_configured", next.APIKey != "",
 		"token_configured", next.AccessToken != "",
+		"title_with_keyword", next.TitleWithKeyword,
 		"path", next.ConfigPath(),
 	)
 

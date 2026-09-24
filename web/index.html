@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light">
 <meta name="referrer" content="same-origin">
-<title>{{if .Keyword}}{{.Keyword}} · {{end}}{{siteName}}</title>
+<title>{{pageTitle .Keyword .TitleWithKeyword}}</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="search" type="application/opensearchdescription+xml" title="{{siteName}}" href="/opensearch.xml">
 <link rel="stylesheet" href="/static/app.css">
